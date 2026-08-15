@@ -125,6 +125,8 @@ typedef uint64_t size_t;
 #include <faiss/impl/HNSW.h>
 #include <faiss/IndexHNSW.h>
 
+#include <faiss/IndexNSGHNSW.h>
+
 #include <faiss/impl/kmeans1d.h>
 
 #include <faiss/impl/NNDescent.h>
@@ -615,6 +617,8 @@ void gpu_sync_all_devices()
 %ignore faiss::IndexHNSW::locks;
 %ignore faiss::IndexBinaryHNSW::locks;
 %include  <faiss/IndexHNSW.h>
+
+%include <faiss/IndexNSGHNSW.h>
 
 %include <faiss/impl/kmeans1d.h>
 

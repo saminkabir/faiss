@@ -55,6 +55,8 @@ struct IndexNSG : Index {
 
     void add(idx_t n, const float* x) override;
 
+    void add_links_only(idx_t n, const float* x);
+
     /// Trains the storage if needed
     void train(idx_t n, const float* x) override;
 

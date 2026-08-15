@@ -91,6 +91,9 @@ struct IndexHNSW : Index {
             ResultHandler& handler,
             SearchParameters* params = nullptr) const override;
 
+
+	void add_links_only(idx_t n, const float* x);
+
     void reconstruct(idx_t key, float* recons) const override;
 
     void reset() override;

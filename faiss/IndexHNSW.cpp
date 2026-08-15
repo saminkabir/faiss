@@ -673,6 +673,36 @@ void IndexHNSW::search1(
     }
 }
 
+void IndexHNSW::add_links_only(idx_t n, const float* x) {
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexHNSWFlat (or variants) instead of IndexHNSW directly");
+    FAISS_THROW_IF_NOT(is_trained);
+    size_t n0 = ntotal;
+    // storage->add(n, x);
+    ntotal = storage->ntotal;
+
+    bool preset_levels = hnsw.levels.size() == static_cast<size_t>(ntotal);
+
+    if (hnsw_deterministic_build) {
+        hnsw_add_vertices_deterministic(
+                hnsw,
+                n0,
+                n,
+                d,
+                init_level0,
+                keep_max_size_level0,
+                preset_levels,
+                verbose,
+                [this] { return storage_distance_computer(storage); },
+                [this, x, n0](DistanceComputer& dc, HNSW::storage_idx_t pt_id) {
+                    dc.set_query(x + (pt_id - n0) * d);
+                });
+    } else {
+        hnsw_add_vertices(*this, n0, n, x, verbose, preset_levels);
+    }
+}
+
 void IndexHNSW::add(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT_MSG(
             storage,

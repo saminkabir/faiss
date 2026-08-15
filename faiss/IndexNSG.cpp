@@ -242,6 +242,114 @@ void IndexNSG::add(idx_t n, const float* x) {
     is_built = true;
 }
 
+void IndexNSG::add_links_only(idx_t n, const float* x) {
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexNSGFlat (or variants) "
+            "instead of IndexNSG directly");
+    FAISS_THROW_IF_NOT(is_trained);
+
+    FAISS_THROW_IF_NOT_MSG(
+            !is_built && ntotal == 0,
+            "NSG does not support incremental addition");
+
+    std::vector<idx_t> knng;
+    if (verbose) {
+        printf("IndexNSG::add %zd vectors\n", size_t(n));
+    }
+
+    if (build_type == 0) { // build with brute force search
+
+        if (verbose) {
+            printf("  Build knn graph with brute force search on storage index\n");
+        }
+
+        // storage->add(n, x);
+        ntotal = storage->ntotal;
+        FAISS_THROW_IF_NOT(ntotal == n);
+
+        knng.resize(ntotal * (GK + 1));
+        storage->assign(ntotal, x, knng.data(), GK + 1);
+
+        // Remove itself
+        // - For metric distance, we just need to remove the first neighbor
+        // - But for non-metric, e.g. inner product, we need to check
+        // - each neighbor
+        if (storage->metric_type == METRIC_INNER_PRODUCT) {
+            for (idx_t i = 0; i < ntotal; i++) {
+                int count = 0;
+                for (int j = 0; j < GK + 1; j++) {
+                    idx_t id = knng[i * (GK + 1) + j];
+                    if (id != i) {
+                        knng[i * GK + count] = id;
+                        count += 1;
+                    }
+                    if (count == GK) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for (idx_t i = 0; i < ntotal; i++) {
+                memmove(knng.data() + i * GK,
+                        knng.data() + i * (GK + 1) + 1,
+                        GK * sizeof(idx_t));
+            }
+        }
+
+    } else if (build_type == 1) { // build with NNDescent
+        IndexNNDescent index(storage, GK);
+        index.nndescent.S = nndescent_S;
+        index.nndescent.R = nndescent_R;
+        index.nndescent.L = std::max(nndescent_L, GK + 50);
+        index.nndescent.iter = nndescent_iter;
+        index.verbose = verbose;
+
+        if (verbose) {
+            printf("  Build knn graph with NNdescent S=%d R=%d L=%d niter=%d\n",
+                   index.nndescent.S,
+                   index.nndescent.R,
+                   index.nndescent.L,
+                   index.nndescent.iter);
+        }
+
+        // prevent IndexNSG from deleting the storage
+        index.own_fields = false;
+
+        index.add(n, x);
+
+        // storage->add is already implicit called in IndexNSG.add
+        ntotal = storage->ntotal;
+        FAISS_THROW_IF_NOT(ntotal == n);
+
+        knng.resize(ntotal * GK);
+
+        // cast from idx_t to int
+        const int* knn_graph = index.nndescent.final_graph.data();
+#pragma omp parallel for
+        for (idx_t i = 0; i < ntotal * GK; i++) {
+            knng[i] = knn_graph[i];
+        }
+    } else {
+        FAISS_THROW_MSG("build_type should be 0 or 1");
+    }
+
+    if (verbose) {
+        printf("  Check the knn graph\n");
+    }
+
+    // check the knn graph
+    check_knn_graph(knng.data(), n, GK);
+
+    if (verbose) {
+        printf("  nsg building\n");
+    }
+
+    const nsg::Graph<idx_t> knn_graph(knng.data(), static_cast<int>(n), GK);
+    nsg.build(storage, n, knn_graph, verbose);
+    is_built = true;
+}
+
 void IndexNSG::reset() {
     nsg.reset();
     FAISS_THROW_IF_NOT_MSG(

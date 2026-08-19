@@ -643,6 +643,14 @@ void gpu_sync_all_devices()
     faiss::nsg::Graph<int>* get_final_graph() {
         return $self->final_graph.get();
     }
+
+    void set_final_graph(faiss::nsg::Graph<int>* graph) {
+
+        $self->final_graph = std::make_shared<faiss::nsg::Graph<int>>(*graph);
+
+        $self->R = graph->K;
+
+    }
 }
 
 %include  <faiss/IndexNSG.h>

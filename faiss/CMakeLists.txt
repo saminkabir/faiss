@@ -107,7 +107,6 @@ set(FAISS_SRC
   IndexFlat.cpp
   IndexFlatCodes.cpp
   IndexHNSW.cpp
-  IndexNSGHNSW.cpp
   IndexIDMap.cpp
   IndexIVF.cpp
   IndexIVFAdditiveQuantizer.cpp

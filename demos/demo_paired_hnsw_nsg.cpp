@@ -51,7 +51,7 @@ int* ivecs_read(const char* fname, size_t* d_out, size_t* n_out) {
 
 int d = 128, M = 32, R = 32, GK = 64;
 size_t nb, d2;
-float* xb = fvecs_read("sift1M/sift_base.fvecs", &d2, &nb);
+float* xb = fvecs_read("/home/cc/datasets/datasets/sift/base.fvecs", &d2, &nb);
 idx_t n = nb;
 d=d2;
 

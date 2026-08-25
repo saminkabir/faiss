@@ -27,4 +27,7 @@ target_link_libraries(demo_residual_quantizer PRIVATE faiss)
 add_executable(demo_paired_hnsw_nsg EXCLUDE_FROM_ALL demo_paired_hnsw_nsg.cpp)
 target_link_libraries(demo_paired_hnsw_nsg PRIVATE faiss)
 
+add_executable(demo_paired_hnsw_nsg_diff_storage EXCLUDE_FROM_ALL demo_paired_hnsw_nsg_diff_storage.cpp)
+target_link_libraries(demo_paired_hnsw_nsg_diff_storage PRIVATE faiss)
+
 add_subdirectory(diversity_filter)

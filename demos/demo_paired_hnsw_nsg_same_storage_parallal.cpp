@@ -1,7 +1,7 @@
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexNSG.h>
-#include "iindex_size_reporting.hpp"
+#include "index_size_reporting.hpp"
 
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/impl/DistanceComputer.h>

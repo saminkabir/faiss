@@ -1,6 +1,7 @@
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexNSG.h>
+#include "iindex_size_reporting.hpp"
 
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/impl/DistanceComputer.h>
@@ -1527,6 +1528,14 @@ int main(
             << "\nSUCCESS: HNSW and NSG were built in parallel "
             << "directly on one shared storage instance — "
             << "no vectors were ever duplicated.\n";
+	IndexSizeReport size_report = report_index_sizes(shared_storage, hnsw, nsg);
+
+	log_metric("index_size", "storage_bytes", static_cast<double>(size_report.storage_bytes));
+	log_metric("index_size", "hnsw_graph_overhead_bytes", static_cast<double>(size_report.hnsw_graph_overhead_bytes));
+	log_metric("index_size", "nsg_graph_overhead_bytes", static_cast<double>(size_report.nsg_graph_overhead_bytes));
+	log_metric("index_size", "combined_bytes", static_cast<double>(size_report.combined_bytes));
+
+
 
 
     // ========================================================

@@ -100,6 +100,18 @@ struct IndexHNSW : Index {
 
     void shrink_level_0_neighbors(int size);
 
+    /** LEANN-style high-degree preserving pruning of the level-0 graph
+     * (Wang et al. 2025, Algorithm 3): a small fraction of hub nodes keeps a
+     * large neighbor budget, all other nodes keep a small one, and reverse
+     * edges still let every node link to the hubs. Upper levels are kept.
+     * Works in place on a built index; needs the stored vectors (or their
+     * codes) to re-select the neighbors. See LeannPruneParams.
+     *
+     * @return degree / size statistics of the pruned graph
+     */
+    LeannPruneStats prune_leann(
+            const LeannPruneParams& params = LeannPruneParams());
+
     /** Perform search only on level 0, given the starting points for
      * each vertex.
      *

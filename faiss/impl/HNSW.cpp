@@ -7,15 +7,22 @@
 
 #include <faiss/impl/HNSW.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cinttypes>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
+#include <memory>
+#include <numeric>
 #include <type_traits>
 
 #include <faiss/IndexHNSW.h>
 
 #include <faiss/impl/DistanceComputer.h>
+#include <faiss/impl/FaissException.h>
 #include <faiss/impl/IDSelector.h>
 #include <faiss/impl/ResultHandler.h>
 #include <faiss/impl/VisitedTable.h>
@@ -1087,6 +1094,497 @@ void HNSW::merge_reverse_links_deterministic(
         merge_reverse_links_impl<C_distance>(
                 *this, dis, node, level, incoming, keep_max_size_level0);
     }
+}
+
+/**************************************************************
+ * LEANN-style high-degree preserving pruning
+ **************************************************************/
+
+namespace {
+
+/// restores hnsw.efConstruction on scope exit (the pass may override it)
+struct EfConstructionGuard {
+    HNSW& hnsw;
+    int saved;
+    explicit EfConstructionGuard(HNSW& h) : hnsw(h), saved(h.efConstruction) {}
+    ~EfConstructionGuard() {
+        hnsw.efConstruction = saved;
+    }
+};
+
+template <class C>
+LeannPruneStats hnsw_prune_leann_impl(
+        HNSW& hnsw,
+        const LeannPruneParams& params,
+        const std::function<DistanceComputer*()>& make_distance_computer,
+        const std::function<void(DistanceComputer&, storage_idx_t)>&
+                set_query) {
+    const int64_t n = static_cast<int64_t>(hnsw.levels.size());
+    FAISS_THROW_IF_NOT_MSG(
+            n > 0 && hnsw.entry_point >= 0, "cannot prune an empty HNSW");
+    FAISS_THROW_IF_NOT(hnsw.offsets.size() == static_cast<size_t>(n) + 1);
+    FAISS_THROW_IF_NOT_MSG(
+            params.hub_fraction >= 0.0f && params.hub_fraction <= 1.0f,
+            "hub_fraction must be in [0, 1]");
+
+    const int slots = hnsw.nb_neighbors(0);
+    const int M_hub = params.hub_max_degree > 0 ? params.hub_max_degree : slots;
+    FAISS_THROW_IF_NOT_FMT(
+            M_hub <= slots,
+            "hub_max_degree=%d exceeds the %d level-0 slots of this HNSW",
+            M_hub,
+            slots);
+    const int m_low = params.low_max_degree > 0 ? params.low_max_degree
+                                                : std::max(1, M_hub / 5);
+    FAISS_THROW_IF_NOT_FMT(
+            m_low <= M_hub,
+            "low_max_degree=%d must not exceed hub_max_degree=%d",
+            m_low,
+            M_hub);
+    // reverse edges that overflow a list re-prune it to this size
+    const int reverse_cap = std::max(
+            1,
+            static_cast<int>(
+                    M_hub -
+                    M_hub * std::clamp(params.reverse_headroom, 0.0f, 0.5f)));
+
+    LeannPruneStats stats;
+    stats.n_nodes = n;
+    stats.hub_max_degree = M_hub;
+    stats.low_max_degree = m_low;
+
+    // ---- degrees of the original graph ------------------------------------
+    std::vector<int> out_deg(n, 0);
+    std::vector<int> in_deg(n, 0);
+    size_t edges_before = 0;
+    int max_before = 0;
+#pragma omp parallel for reduction(+ : edges_before) reduction(max : max_before)
+    for (int64_t i = 0; i < n; i++) {
+        size_t begin, end;
+        hnsw.neighbor_range(i, 0, &begin, &end);
+        int deg = 0;
+        for (size_t j = begin; j < end; j++) {
+            storage_idx_t nb = hnsw.neighbors[j];
+            if (nb < 0) {
+                break;
+            }
+            deg++;
+#pragma omp atomic
+            in_deg[nb]++;
+        }
+        out_deg[i] = deg;
+        edges_before += deg;
+        max_before = std::max(max_before, deg);
+    }
+    stats.edges_before = edges_before;
+    stats.avg_degree_before = double(edges_before) / n;
+    stats.max_degree_before = max_before;
+
+    // ---- pick the hubs: top hub_fraction nodes by degree ------------------
+    std::vector<uint8_t> is_hub;
+    size_t n_hubs = leann_select_hubs(
+            out_deg, in_deg, params.hub_score, params.hub_fraction, is_hub);
+    // the search always starts here, keep it well connected
+    if (!is_hub[hnsw.entry_point]) {
+        is_hub[hnsw.entry_point] = 1;
+        n_hubs++;
+    }
+    stats.n_hubs = n_hubs;
+
+    if (params.verbose) {
+        printf("hnsw_prune_leann: n=%" PRId64
+               " hubs=%zd M=%d m=%d level-0 slots=%d "
+               "avg degree before=%.2f\n",
+               n,
+               n_hubs,
+               M_hub,
+               m_low,
+               slots,
+               stats.avg_degree_before);
+    }
+
+    // ---- re-insert every node into an emptied level 0 --------------------
+    // The level-0 lists are rebuilt the way the deterministic HNSW build does
+    // it (buckets by level, highest first, prefix-doubling batches: phase A
+    // searches the frozen partial graph, phase B merges reverse edges), so
+    // that every node connects to nodes that are already in the graph and
+    // the result does not depend on the thread count. What differs is that
+    // the neighbor budget depends on the node: hubs pick up to M_hub edges,
+    // the others m_low; reverse edges may grow any list up to M_hub. The
+    // upper levels are left as they are: they stay valid because a node of
+    // level L only ever descends through levels > L, whose nodes are all
+    // inserted before it.
+    EfConstructionGuard ef_guard(hnsw);
+    if (params.candidate_pool_size > 0) {
+        hnsw.efConstruction = params.candidate_pool_size;
+    }
+
+    FAISS_THROW_IF_NOT(hnsw.levels[hnsw.entry_point] - 1 == hnsw.max_level);
+    const int top_level = hnsw.max_level;
+
+#pragma omp parallel for
+    for (int64_t i = 0; i < n; i++) {
+        size_t begin, end;
+        hnsw.neighbor_range(i, 0, &begin, &end);
+        for (size_t j = begin; j < end; j++) {
+            hnsw.neighbors[j] = -1;
+        }
+    }
+
+    // bucket the nodes by level, highest first: the nodes of level l are
+    // order[bucket_begin[l] .. bucket_begin[l] + bucket_size[l])
+    std::vector<size_t> bucket_size(top_level + 1, 0);
+    for (int64_t i = 0; i < n; i++) {
+        bucket_size[hnsw.levels[i] - 1]++;
+    }
+    std::vector<size_t> bucket_begin(top_level + 1, 0);
+    for (int l = top_level - 1; l >= 0; l--) {
+        bucket_begin[l] = bucket_begin[l + 1] + bucket_size[l + 1];
+    }
+    std::vector<storage_idx_t> order(n);
+    {
+        std::vector<size_t> pos = bucket_begin;
+        for (int64_t i = 0; i < n; i++) {
+            order[pos[hnsw.levels[i] - 1]++] = static_cast<storage_idx_t>(i);
+        }
+    }
+
+    // a batch is at most 2% of the index (ParlayANN's theta)
+    const size_t theta = std::max<size_t>(1, static_cast<size_t>(0.02 * n));
+    RandomGenerator rng2(789);
+
+    const int max_threads = omp_get_max_threads();
+    std::vector<std::vector<std::pair<storage_idx_t, storage_idx_t>>> rev_local(
+            max_threads);
+    std::vector<std::pair<storage_idx_t, storage_idx_t>> rev_edges;
+
+    std::exception_ptr ex;
+    std::atomic<bool> interrupt{false};
+
+    for (int pt_level = top_level; pt_level >= 0; pt_level--) {
+        const size_t i0 = bucket_begin[pt_level];
+        const size_t i1 = i0 + bucket_size[pt_level];
+        if (i0 == i1) {
+            continue;
+        }
+
+        // random permutation to get rid of dataset order bias
+        for (size_t j = i0; j < i1; j++) {
+            std::swap(
+                    order[j],
+                    order[j + rng2.rand_int(static_cast<int>(i1 - j))]);
+        }
+        if (pt_level == top_level) {
+            // the entry point goes in first
+            auto it = std::find(
+                    order.begin() + i0, order.begin() + i1, hnsw.entry_point);
+            FAISS_THROW_IF_NOT(it != order.begin() + i1);
+            std::swap(order[i0], *it);
+        }
+
+        size_t s = i0;
+        while (s < i1) {
+            const size_t done = s - i0;
+            const size_t grow = std::min(done == 0 ? size_t(1) : done, theta);
+            const size_t e = std::min(i1, s + grow);
+
+            // ---- phase A: forward links against the frozen graph ----------
+            for (auto& r : rev_local) {
+                r.clear();
+            }
+#pragma omp parallel if (e - s > 100)
+            {
+                std::unique_ptr<VisitedTable> vt;
+                std::unique_ptr<DistanceComputer> dis;
+                try {
+                    vt = VisitedTable::create(n, hnsw.use_visited_hashset);
+                    dis.reset(make_distance_computer());
+                } catch (...) {
+                    omp_capture_exception(ex, [&] { interrupt = true; });
+                }
+                auto& my_rev = rev_local[omp_get_thread_num()];
+
+#pragma omp for schedule(dynamic, 16)
+                for (int64_t idx = s; idx < static_cast<int64_t>(e); idx++) {
+                    if (interrupt.load(std::memory_order_relaxed)) {
+                        continue;
+                    }
+                    try {
+                        const storage_idx_t v = order[idx];
+                        set_query(*dis, v);
+
+                        storage_idx_t nearest = hnsw.entry_point;
+                        float d_nearest = (*dis)(nearest);
+                        for (int level = hnsw.max_level; level > pt_level;
+                             level--) {
+                            greedy_update_nearest_impl<C>(
+                                    hnsw, *dis, level, nearest, d_nearest);
+                        }
+
+                        std::priority_queue<HNSW::NodeDistCloserT<C>> results;
+                        search_neighbors_to_add_dispatch<C>(
+                                hnsw,
+                                *dis,
+                                results,
+                                nearest,
+                                d_nearest,
+                                0,
+                                *vt,
+                                false);
+
+                        // v is not linked yet, but it is its own candidate
+                        // when it is the entry point
+                        std::priority_queue<HNSW::NodeDistFartherT<C>> input;
+                        while (!results.empty()) {
+                            const auto& top = results.top();
+                            if (top.id != v) {
+                                input.emplace(top.d, top.id);
+                            }
+                            results.pop();
+                        }
+
+                        std::vector<HNSW::NodeDistFartherT<C>> kept;
+                        HNSW::shrink_neighbor_list<C>(
+                                *dis,
+                                input,
+                                kept,
+                                is_hub[v] ? M_hub : m_low,
+                                false);
+
+                        size_t begin, end;
+                        hnsw.neighbor_range(v, 0, &begin, &end);
+                        size_t j = begin;
+                        for (const auto& nb : kept) {
+                            hnsw.neighbors[j++] = nb.id;
+                            my_rev.emplace_back(nb.id, v);
+                        }
+                    } catch (...) {
+                        omp_capture_exception(ex, [&] { interrupt = true; });
+                    }
+                }
+            }
+            omp_rethrow_if_exception(ex);
+
+            // ---- phase B: merge the reverse edges, grouped by destination -
+            rev_edges.clear();
+            for (auto& r : rev_local) {
+                rev_edges.insert(rev_edges.end(), r.begin(), r.end());
+            }
+            std::sort(rev_edges.begin(), rev_edges.end());
+            std::vector<size_t> group_start;
+            for (size_t i = 0; i < rev_edges.size(); i++) {
+                if (i == 0 || rev_edges[i].first != rev_edges[i - 1].first) {
+                    group_start.push_back(i);
+                }
+            }
+            group_start.push_back(rev_edges.size());
+            const int64_t n_groups =
+                    static_cast<int64_t>(group_start.size()) - 1;
+
+#pragma omp parallel if (n_groups > 100)
+            {
+                std::unique_ptr<DistanceComputer> dis;
+                try {
+                    dis.reset(make_distance_computer());
+                } catch (...) {
+                    omp_capture_exception(ex, [&] { interrupt = true; });
+                }
+                std::vector<std::pair<float, storage_idx_t>> arr, kept;
+
+#pragma omp for schedule(dynamic, 16)
+                for (int64_t g = 0; g < n_groups; g++) {
+                    if (interrupt.load(std::memory_order_relaxed)) {
+                        continue;
+                    }
+                    try {
+                        const storage_idx_t u = rev_edges[group_start[g]].first;
+                        size_t begin, end;
+                        hnsw.neighbor_range(u, 0, &begin, &end);
+
+                        arr.clear();
+                        size_t n_cur = 0;
+                        for (size_t j = begin; j < end; j++, n_cur++) {
+                            if (hnsw.neighbors[j] < 0) {
+                                break;
+                            }
+                            arr.emplace_back(0.0f, hnsw.neighbors[j]);
+                        }
+                        for (size_t k = group_start[g]; k < group_start[g + 1];
+                             k++) {
+                            const storage_idx_t v = rev_edges[k].second;
+                            if (v == u) {
+                                continue;
+                            }
+                            bool present = false;
+                            for (size_t j = 0; j < n_cur; j++) {
+                                if (arr[j].second == v) {
+                                    present = true;
+                                    break;
+                                }
+                            }
+                            if (!present) {
+                                arr.emplace_back(0.0f, v);
+                            }
+                        }
+                        for (auto& cand : arr) {
+                            cand.first = dis->symmetric_dis(u, cand.second);
+                        }
+                        // nearest first, ties by id (order-independent)
+                        std::sort(
+                                arr.begin(),
+                                arr.end(),
+                                [](const std::pair<float, storage_idx_t>& a,
+                                   const std::pair<float, storage_idx_t>& b) {
+                                    if (a.first != b.first) {
+                                        return C::cmp(b.first, a.first);
+                                    }
+                                    return a.second < b.second;
+                                });
+
+                        const std::vector<std::pair<float, storage_idx_t>>*
+                                out = &arr;
+                        if (arr.size() > static_cast<size_t>(M_hub)) {
+                            // overflow: HNSW's RNG heuristic, down to the cap
+                            kept.clear();
+                            for (const auto& cand : arr) {
+                                bool good = true;
+                                for (const auto& kp : kept) {
+                                    float d_kc = dis->symmetric_dis(
+                                            kp.second, cand.second);
+                                    if (C::cmp(cand.first, d_kc)) {
+                                        good = false;
+                                        break;
+                                    }
+                                }
+                                if (good) {
+                                    kept.push_back(cand);
+                                    if (kept.size() >=
+                                        static_cast<size_t>(reverse_cap)) {
+                                        break;
+                                    }
+                                }
+                            }
+                            out = &kept;
+                        }
+
+                        size_t j = begin;
+                        for (const auto& cand : *out) {
+                            hnsw.neighbors[j++] = cand.second;
+                        }
+                        while (j < end) {
+                            hnsw.neighbors[j++] = -1;
+                        }
+                    } catch (...) {
+                        omp_capture_exception(ex, [&] { interrupt = true; });
+                    }
+                }
+            }
+            omp_rethrow_if_exception(ex);
+
+            s = e;
+        }
+    }
+
+    // ---- statistics of the pruned graph -----------------------------------
+    std::fill(in_deg.begin(), in_deg.end(), 0);
+    size_t edges_after = 0, hub_edges = 0;
+    int max_after = 0;
+    for (int64_t i = 0; i < n; i++) {
+        size_t begin, end;
+        hnsw.neighbor_range(i, 0, &begin, &end);
+        int deg = 0;
+        for (size_t j = begin; j < end; j++) {
+            storage_idx_t nb = hnsw.neighbors[j];
+            if (nb < 0) {
+                break;
+            }
+            deg++;
+            in_deg[nb]++;
+        }
+        edges_after += deg;
+        if (is_hub[i]) {
+            hub_edges += deg;
+        }
+        max_after = std::max(max_after, deg);
+    }
+    stats.edges_after = edges_after;
+    stats.avg_degree_after = double(edges_after) / n;
+    stats.max_degree_after = max_after;
+    stats.avg_degree_hubs_after = n_hubs ? double(hub_edges) / n_hubs : 0.0;
+    stats.avg_degree_non_hubs_after = n > int64_t(n_hubs)
+            ? double(edges_after - hub_edges) / (n - n_hubs)
+            : 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        if (in_deg[i] == 0 && i != hnsw.entry_point) {
+            stats.n_zero_indegree_after++;
+        }
+    }
+    stats.edge_bytes_before = edges_before * sizeof(storage_idx_t);
+    stats.edge_bytes_after = edges_after * sizeof(storage_idx_t);
+
+    { // reachability on level 0 from the places a search can start
+        std::vector<uint8_t> seen(n, 0);
+        std::vector<storage_idx_t> frontier;
+        auto push = [&](storage_idx_t i) {
+            if (!seen[i]) {
+                seen[i] = 1;
+                frontier.push_back(i);
+            }
+        };
+        push(hnsw.entry_point);
+        for (int64_t i = 0; i < n; i++) {
+            if (hnsw.levels[i] > 1) {
+                push(static_cast<storage_idx_t>(i));
+            }
+        }
+        size_t n_seen = frontier.size();
+        while (!frontier.empty()) {
+            storage_idx_t u = frontier.back();
+            frontier.pop_back();
+            size_t begin, end;
+            hnsw.neighbor_range(u, 0, &begin, &end);
+            for (size_t j = begin; j < end && hnsw.neighbors[j] >= 0; j++) {
+                storage_idx_t v = hnsw.neighbors[j];
+                if (!seen[v]) {
+                    seen[v] = 1;
+                    n_seen++;
+                    frontier.push_back(v);
+                }
+            }
+        }
+        stats.n_unreachable_after = n - n_seen;
+    }
+
+    if (params.verbose) {
+        printf("hnsw_prune_leann: avg degree %.2f -> %.2f "
+               "(hubs %.2f, others %.2f), max degree %d -> %d, "
+               "%zd nodes without in-edges, %zd unreachable\n",
+               stats.avg_degree_before,
+               stats.avg_degree_after,
+               stats.avg_degree_hubs_after,
+               stats.avg_degree_non_hubs_after,
+               stats.max_degree_before,
+               stats.max_degree_after,
+               stats.n_zero_indegree_after,
+               stats.n_unreachable_after);
+    }
+    return stats;
+}
+
+} // namespace
+
+LeannPruneStats hnsw_prune_leann(
+        HNSW& hnsw,
+        const LeannPruneParams& params,
+        const std::function<DistanceComputer*()>& make_distance_computer,
+        const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
+                set_query) {
+    if (hnsw.is_similarity) {
+        return hnsw_prune_leann_impl<HNSW::C_similarity>(
+                hnsw, params, make_distance_computer, set_query);
+    }
+    return hnsw_prune_leann_impl<HNSW::C_distance>(
+            hnsw, params, make_distance_computer, set_query);
 }
 
 /**************************************************************

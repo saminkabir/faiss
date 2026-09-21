@@ -18,6 +18,7 @@
 #include <faiss/Index.h>
 #include <faiss/impl/DistanceComputer.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/impl/LeannPrune.h>
 #include <faiss/impl/maybe_owned_vector.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/random.h>
@@ -295,6 +296,34 @@ void hnsw_add_vertices_deterministic(
         bool keep_max_size_level0,
         bool preset_levels,
         bool verbose,
+        const std::function<DistanceComputer*()>& make_distance_computer,
+        const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
+                set_query);
+
+/** LEANN-style high-degree preserving pruning of the level-0 graph
+ * (LEANN, Wang et al. 2025, Section 5 / Algorithm 3), shared by IndexHNSW.
+ *
+ * Every node's level-0 neighbor list is re-selected from the original graph:
+ *  - the top `hub_fraction` nodes by degree (the hubs) keep up to
+ *    `hub_max_degree` (M) neighbors, all other nodes pick only
+ *    `low_max_degree` (m) neighbors, with HNSW's usual RNG heuristic;
+ *  - every chosen edge is added in both directions, and any node may grow up
+ *    to `hub_max_degree` through reverse edges (re-pruned with the same
+ *    heuristic when it overflows), so every node keeps access to the hubs.
+ * The upper levels are left untouched. The candidate neighbors of node v are
+ * found by searching the original graph (efConstruction, or
+ * `candidate_pool_size`), so the result does not depend on insertion order and
+ * the pass is parallel and deterministic.
+ *
+ * The neighbor table keeps its fixed-size, -1 padded layout; use the returned
+ * statistics (edge_bytes_after) for the size of a compact CSR encoding.
+ *
+ * `make_distance_computer()` returns a fresh DistanceComputer per thread
+ * (caller-owned) and `set_query(dc, pt_id)` points it at pt_id's vector.
+ */
+LeannPruneStats hnsw_prune_leann(
+        HNSW& hnsw,
+        const LeannPruneParams& params,
         const std::function<DistanceComputer*()>& make_distance_computer,
         const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
                 set_query);

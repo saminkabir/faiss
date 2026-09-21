@@ -16,6 +16,7 @@
 
 #include <faiss/Index.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/impl/LeannPrune.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/random.h>
 
@@ -213,6 +214,33 @@ struct NSG {
 
     // check the integrity of the NSG built
     void check_graph() const;
+
+    /** LEANN-style high-degree preserving pruning of a built NSG, in place
+     * (adapted from Wang et al. 2025, Algorithm 3, which is described for
+     * HNSW).
+     *
+     * A small fraction of hub nodes (`hub_fraction`, selected by
+     * `hub_score` on the original graph, plus the navigating node) keeps up
+     * to `hub_max_degree` out-edges (default R, i.e. all of them). Every other
+     * node keeps at most `low_max_degree` (default R / 5) of its out-edges:
+     * first the ones that point to hubs, so that each node keeps its access
+     * to the hub backbone, then its nearest others. Only edges that exist
+     * already are kept, no search is needed. Finally the graph is made fully
+     * connected again with tree_grow, as after a normal build.
+     *
+     * Re-selecting the edges of a built NSG under a smaller degree budget
+     * (searching the graph again and re-running the MRNG rule with that
+     * budget) was clearly worse than this in our tests: the small budget
+     * keeps only the nearest MRNG edges and drops the longer ones that NSG
+     * relies on for navigation.
+     *
+     * The adjacency matrix keeps its N-by-R, -1 padded layout; use the
+     * returned statistics (edge_bytes_after) for the size of a compact
+     * encoding. `candidate_pool_size` and `reverse_headroom` are not used.
+     */
+    LeannPruneStats prune_leann(
+            Index* storage,
+            const LeannPruneParams& params = LeannPruneParams());
 };
 
 } // namespace faiss

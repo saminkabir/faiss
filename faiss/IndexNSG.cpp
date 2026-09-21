@@ -242,6 +242,15 @@ void IndexNSG::add(idx_t n, const float* x) {
     is_built = true;
 }
 
+LeannPruneStats IndexNSG::prune_leann(const LeannPruneParams& params) {
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexNSGFlat (or variants) "
+            "instead of IndexNSG directly");
+    FAISS_THROW_IF_NOT_MSG(is_built, "the IndexNSG is not built yet");
+    return nsg.prune_leann(storage, params);
+}
+
 void IndexNSG::add_links_only(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT_MSG(
             storage,

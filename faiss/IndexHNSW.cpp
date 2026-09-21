@@ -793,6 +793,29 @@ void IndexHNSW::shrink_level_0_neighbors(int new_size) {
     }
 }
 
+LeannPruneStats IndexHNSW::prune_leann(const LeannPruneParams& params) {
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexHNSWFlat (or variants) instead of IndexHNSW directly");
+    FAISS_THROW_IF_NOT_MSG(ntotal > 0, "cannot prune an empty index");
+    FAISS_THROW_IF_NOT_MSG(
+            hnsw.levels.size() == static_cast<size_t>(ntotal),
+            "the HNSW graph does not cover all stored vectors");
+
+    return hnsw_prune_leann(
+            hnsw,
+            params,
+            [this] { return storage_distance_computer(storage); },
+            [this](DistanceComputer& dc, HNSW::storage_idx_t pt_id) {
+                // the distance computer keeps a pointer to the query, so it
+                // has to stay valid until the next call from the same thread
+                thread_local std::vector<float> query;
+                query.resize(storage->d);
+                storage->reconstruct(pt_id, query.data());
+                dc.set_query(query.data());
+            });
+}
+
 void IndexHNSW::search_level_0(
         idx_t n,
         const float* x,

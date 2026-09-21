@@ -128,6 +128,50 @@ inline size_t nsg_graph_bytes_direct(const faiss::NSG& nsg) {
 }
 
 // ------------------------------------------------------------
+// Compact (CSR) size of a graph — use this after prune_leann().
+//
+// The in-memory HNSW / NSG tables above are fixed-size and -1 padded, so
+// removing edges (IndexHNSW::prune_leann / IndexNSG::prune_leann) does not
+// change what *_bytes_direct() reports. The saving appears in a compact
+// encoding that stores only the existing edges, which is how LEANN counts the
+// graph: 4 bytes per neighbor id plus one 4-byte row pointer per adjacency
+// row. These functions estimate that encoding from the live structures.
+//
+//   HNSW : 4 * (#edges over all levels) + 4 * (#rows + 1) + 4 * ntotal
+//          (#rows = sum of levels[i]: one row per node and level it is on;
+//          the last term is the per-node level)
+//   NSG  : 4 * (#edges) + 4 * (N + 1)
+// ------------------------------------------------------------
+
+inline size_t hnsw_graph_bytes_compact(const faiss::HNSW& h) {
+    size_t edges = 0;
+    for (size_t i = 0; i < h.neighbors.size(); i++) {
+        if (h.neighbors[i] >= 0) {
+            edges++;
+        }
+    }
+    size_t rows = 0;
+    for (int lvl : h.levels) {
+        rows += lvl;
+    }
+    return sizeof(int32_t) * (edges + rows + 1 + h.levels.size());
+}
+
+inline size_t nsg_graph_bytes_compact(const faiss::NSG& nsg) {
+    if (!nsg.is_built || !nsg.final_graph) {
+        return 0;
+    }
+    const auto& g = *nsg.final_graph;
+    size_t edges = 0;
+    for (int i = 0; i < g.N; i++) {
+        for (int j = 0; j < g.K && g.at(i, j) >= 0; j++) {
+            edges++;
+        }
+    }
+    return sizeof(int32_t) * (edges + static_cast<size_t>(g.N) + 1);
+}
+
+// ------------------------------------------------------------
 // Process RSS (resident set size) in bytes, read from
 // /proc/self/status. Linux-only. Use as a sanity check on the
 // numbers above, not as the primary source — it reflects the
@@ -159,6 +203,9 @@ struct IndexSizeReport {
     size_t storage_bytes = 0;
     size_t hnsw_graph_overhead_bytes = 0;
     size_t nsg_graph_overhead_bytes = 0;
+    // compact (CSR) size of the two graphs, see hnsw_graph_bytes_compact()
+    size_t hnsw_graph_compact_bytes = 0;
+    size_t nsg_graph_compact_bytes = 0;
     size_t combined_bytes = 0; // storage counted once + both graphs
     size_t unshared_total_bytes = 0; // what it would cost with two
                                       // independent copies of storage
@@ -174,6 +221,8 @@ inline IndexSizeReport report_index_sizes(
     r.storage_bytes = flat_storage_bytes_direct(shared_storage);
     r.hnsw_graph_overhead_bytes = hnsw_graph_bytes_direct(hnsw.hnsw);
     r.nsg_graph_overhead_bytes = nsg_graph_bytes_direct(nsg.nsg);
+    r.hnsw_graph_compact_bytes = hnsw_graph_bytes_compact(hnsw.hnsw);
+    r.nsg_graph_compact_bytes = nsg_graph_bytes_compact(nsg.nsg);
     r.combined_bytes = r.storage_bytes + r.hnsw_graph_overhead_bytes +
             r.nsg_graph_overhead_bytes;
     r.unshared_total_bytes = 2 * r.storage_bytes +
@@ -191,6 +240,10 @@ inline IndexSizeReport report_index_sizes(
               << " bytes (" << MB(r.hnsw_graph_overhead_bytes) << " MB)\n";
     std::cout << "  NSG  graph overhead    : " << r.nsg_graph_overhead_bytes
               << " bytes (" << MB(r.nsg_graph_overhead_bytes) << " MB)\n";
+    std::cout << "  HNSW graph, compact CSR: " << r.hnsw_graph_compact_bytes
+              << " bytes (" << MB(r.hnsw_graph_compact_bytes) << " MB)\n";
+    std::cout << "  NSG  graph, compact CSR: " << r.nsg_graph_compact_bytes
+              << " bytes (" << MB(r.nsg_graph_compact_bytes) << " MB)\n";
     std::cout << "  Combined (storage x1)  : " << r.combined_bytes
               << " bytes (" << MB(r.combined_bytes) << " MB)\n";
     std::cout << "  If storage were NOT shared, total would be "

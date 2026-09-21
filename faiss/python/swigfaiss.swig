@@ -122,6 +122,7 @@ typedef uint64_t size_t;
 #include <faiss/IndexShardsIVF.h>
 #include <faiss/IndexReplicas.h>
 #include <faiss/impl/hnsw/MinimaxHeap.h>
+#include <faiss/impl/LeannPrune.h>
 #include <faiss/impl/HNSW.h>
 #include <faiss/IndexHNSW.h>
 
@@ -611,6 +612,7 @@ void gpu_sync_all_devices()
 %include  <faiss/IndexIVFSpectralHash.h>
 %include  <faiss/IndexIVFAdditiveQuantizer.h>
 %include  <faiss/impl/hnsw/MinimaxHeap.h>
+%include  <faiss/impl/LeannPrune.h>
 %include  <faiss/impl/HNSW.h>
 %ignore faiss::IndexHNSW::locks;
 %ignore faiss::IndexBinaryHNSW::locks;

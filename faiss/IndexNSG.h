@@ -74,6 +74,17 @@ struct IndexNSG : Index {
     void reset() override;
 
     void check_knn_graph(const idx_t* knn_graph, idx_t n, int K) const;
+
+    /** LEANN-style high-degree preserving pruning of the built graph, in
+     * place (adapted from Wang et al. 2025, Algorithm 3). Hubs keep their
+     * edges, every other node keeps its edges into hubs and then its nearest
+     * ones, up to a small budget. See NSG::prune_leann and LeannPruneParams.
+     * Needs the stored vectors to order the edges.
+     *
+     * @return degree / size statistics of the pruned graph
+     */
+    LeannPruneStats prune_leann(
+            const LeannPruneParams& params = LeannPruneParams());
 };
 
 /** Flat index topped with with a NSG structure to access elements

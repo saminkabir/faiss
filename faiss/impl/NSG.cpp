@@ -8,12 +8,16 @@
 #include <faiss/impl/NSG.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cinttypes>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <stack>
 
 #include <faiss/impl/DistanceComputer.h>
+#include <faiss/impl/FaissException.h>
 #include <faiss/impl/VisitedTable.h>
 
 namespace faiss {
@@ -670,6 +674,225 @@ void NSG::check_graph() const {
             FAISS_THROW_IF_NOT(id < ntotal && (id >= 0 || id == EMPTY_ID));
         }
     }
+}
+
+/**************************************************************
+ * LEANN-style high-degree preserving pruning
+ **************************************************************/
+
+LeannPruneStats NSG::prune_leann(
+        Index* storage,
+        const LeannPruneParams& params) {
+    FAISS_THROW_IF_NOT_MSG(is_built && final_graph, "NSG is not built");
+    FAISS_THROW_IF_NOT(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            params.hub_fraction >= 0.0f && params.hub_fraction <= 1.0f,
+            "hub_fraction must be in [0, 1]");
+
+    const int n = ntotal;
+    const int M_hub = params.hub_max_degree > 0 ? params.hub_max_degree : R;
+    FAISS_THROW_IF_NOT_FMT(
+            M_hub <= R, "hub_max_degree=%d exceeds R=%d of this NSG", M_hub, R);
+    const int m_low = params.low_max_degree > 0 ? params.low_max_degree
+                                                : std::max(1, M_hub / 5);
+    FAISS_THROW_IF_NOT_FMT(
+            m_low <= M_hub,
+            "low_max_degree=%d must not exceed hub_max_degree=%d",
+            m_low,
+            M_hub);
+
+    LeannPruneStats stats;
+    stats.n_nodes = n;
+    stats.hub_max_degree = M_hub;
+    stats.low_max_degree = m_low;
+
+    nsg::Graph<int>& g = *final_graph;
+
+    // ---- degrees of the original graph ------------------------------------
+    std::vector<int> out_deg(n, 0);
+    std::vector<int> in_deg(n, 0);
+    size_t edges_before = 0;
+    int max_before = 0;
+#pragma omp parallel for reduction(+ : edges_before) reduction(max : max_before)
+    for (int i = 0; i < n; i++) {
+        int deg = 0;
+        for (int j = 0; j < R; j++) {
+            int id = g.at(i, j);
+            if (id == EMPTY_ID) {
+                break;
+            }
+            deg++;
+#pragma omp atomic
+            in_deg[id]++;
+        }
+        out_deg[i] = deg;
+        edges_before += deg;
+        max_before = std::max(max_before, deg);
+    }
+    stats.edges_before = edges_before;
+    stats.avg_degree_before = double(edges_before) / n;
+    stats.max_degree_before = max_before;
+
+    // ---- hubs -------------------------------------------------------------
+    std::vector<uint8_t> is_hub;
+    size_t n_hubs = leann_select_hubs(
+            out_deg, in_deg, params.hub_score, params.hub_fraction, is_hub);
+    if (!is_hub[enterpoint]) { // every search starts at the navigating node
+        is_hub[enterpoint] = 1;
+        n_hubs++;
+    }
+    stats.n_hubs = n_hubs;
+
+    if (params.verbose) {
+        printf("NSG::prune_leann: n=%d hubs=%zd M=%d m=%d R=%d "
+               "avg degree before=%.2f\n",
+               n,
+               n_hubs,
+               M_hub,
+               m_low,
+               R,
+               stats.avg_degree_before);
+    }
+
+    // ---- prune the out-edges of every node --------------------------------
+    // A node keeps at most M_hub (hub) or m_low (other) of its out-edges,
+    // the ones that point to hubs first, then the nearest others. Only edges
+    // that already exist are kept (duplicate entries, which a built NSG can
+    // contain, are dropped), so the pass is deterministic and needs no search.
+    std::vector<int> degrees(n, 0);
+    {
+        std::exception_ptr ex;
+        std::atomic<bool> interrupt{false};
+#pragma omp parallel
+        {
+            std::unique_ptr<DistanceComputer> dis;
+            try {
+                dis.reset(storage_distance_computer(storage));
+            } catch (...) {
+                omp_capture_exception(ex, [&] { interrupt = true; });
+            }
+            std::vector<Node> row;
+
+#pragma omp for schedule(dynamic, 256)
+            for (int q = 0; q < n; q++) {
+                if (interrupt.load(std::memory_order_relaxed)) {
+                    continue;
+                }
+                try {
+                    const int budget = is_hub[q] ? M_hub : m_low;
+
+                    row.clear();
+                    for (int j = 0; j < out_deg[q]; j++) {
+                        const int id = g.at(q, j);
+                        bool dup = false;
+                        for (const Node& nd : row) {
+                            if (nd.id == id) {
+                                dup = true;
+                                break;
+                            }
+                        }
+                        if (!dup) {
+                            row.emplace_back(id, 0.0f);
+                        }
+                    }
+
+                    if (static_cast<int>(row.size()) > budget) {
+                        for (Node& nd : row) {
+                            nd.distance = dis->symmetric_dis(q, nd.id);
+                        }
+                        // edges into hubs first, then by distance (ties by id)
+                        std::sort(
+                                row.begin(),
+                                row.end(),
+                                [&](const Node& a, const Node& b) {
+                                    if (is_hub[a.id] != is_hub[b.id]) {
+                                        return is_hub[a.id] > is_hub[b.id];
+                                    }
+                                    return a.distance != b.distance
+                                            ? a.distance < b.distance
+                                            : a.id < b.id;
+                                });
+                        row.resize(budget);
+                    }
+                    if (static_cast<int>(row.size()) != out_deg[q] ||
+                        out_deg[q] > budget) {
+                        for (int j = 0; j < R; j++) {
+                            g.at(q, j) = j < static_cast<int>(row.size())
+                                    ? row[j].id
+                                    : EMPTY_ID;
+                        }
+                    }
+                    degrees[q] = static_cast<int>(row.size());
+                } catch (...) {
+                    omp_capture_exception(ex, [&] { interrupt = true; });
+                }
+            }
+        }
+        omp_rethrow_if_exception(ex);
+    }
+
+    // ---- make the graph fully connected again, as after a normal build ----
+    int num_attached = tree_grow(storage, degrees);
+    check_graph();
+
+    // ---- statistics -------------------------------------------------------
+    std::fill(in_deg.begin(), in_deg.end(), 0);
+    size_t edges_after = 0, hub_edges = 0;
+    int max_after = 0;
+    for (int i = 0; i < n; i++) {
+        int deg = 0;
+        for (int j = 0; j < R; j++) {
+            int id = g.at(i, j);
+            if (id == EMPTY_ID) {
+                break;
+            }
+            deg++;
+            in_deg[id]++;
+        }
+        edges_after += deg;
+        if (is_hub[i]) {
+            hub_edges += deg;
+        }
+        max_after = std::max(max_after, deg);
+    }
+    stats.edges_after = edges_after;
+    stats.avg_degree_after = double(edges_after) / n;
+    stats.max_degree_after = max_after;
+    stats.avg_degree_hubs_after = n_hubs ? double(hub_edges) / n_hubs : 0.0;
+    stats.avg_degree_non_hubs_after = n > static_cast<int>(n_hubs)
+            ? double(edges_after - hub_edges) / (n - n_hubs)
+            : 0.0;
+    for (int i = 0; i < n; i++) {
+        if (in_deg[i] == 0 && i != enterpoint) {
+            stats.n_zero_indegree_after++;
+        }
+    }
+    {
+        // nodes not reachable from the navigating node (tree_grow made this
+        // 0, the count guards against regressions)
+        std::unique_ptr<VisitedTable> vt =
+                VisitedTable::create(ntotal, use_visited_hashset);
+        int reached = dfs(*vt, enterpoint, 0);
+        stats.n_unreachable_after = n - reached;
+    }
+    stats.edge_bytes_before = edges_before * sizeof(int32_t);
+    stats.edge_bytes_after = edges_after * sizeof(int32_t);
+
+    if (params.verbose) {
+        printf("NSG::prune_leann: avg degree %.2f -> %.2f "
+               "(hubs %.2f, others %.2f), max degree %d -> %d, "
+               "%d nodes re-attached by tree_grow, "
+               "%zd nodes without in-edges\n",
+               stats.avg_degree_before,
+               stats.avg_degree_after,
+               stats.avg_degree_hubs_after,
+               stats.avg_degree_non_hubs_after,
+               stats.max_degree_before,
+               stats.max_degree_after,
+               num_attached,
+               stats.n_zero_indegree_after);
+    }
+    return stats;
 }
 
 } // namespace faiss

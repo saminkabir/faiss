@@ -295,6 +295,7 @@ set(FAISS_HEADERS
   impl/FaissAssert.h
   impl/FaissException.h
   impl/HNSW.h
+  impl/LeannPrune.h
   impl/hnsw/LockVector.h
   impl/hnsw/MinimaxHeap.h
   impl/LocalSearchQuantizer.h

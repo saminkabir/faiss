@@ -1,0 +1,1901 @@
+diff --git a/demos/index_size_reporting.hpp b/demos/index_size_reporting.hpp
+index f7598d1..4cdeb2f 100644
+--- a/demos/index_size_reporting.hpp
++++ b/demos/index_size_reporting.hpp
+@@ -127,6 +127,50 @@ inline size_t nsg_graph_bytes_direct(const faiss::NSG& nsg) {
+     return N * K * sizeof(int32_t);
+ }
+ 
++// ------------------------------------------------------------
++// Compact (CSR) size of a graph — use this after prune_leann().
++//
++// The in-memory HNSW / NSG tables above are fixed-size and -1 padded, so
++// removing edges (IndexHNSW::prune_leann / IndexNSG::prune_leann) does not
++// change what *_bytes_direct() reports. The saving appears in a compact
++// encoding that stores only the existing edges, which is how LEANN counts the
++// graph: 4 bytes per neighbor id plus one 4-byte row pointer per adjacency
++// row. These functions estimate that encoding from the live structures.
++//
++//   HNSW : 4 * (#edges over all levels) + 4 * (#rows + 1) + 4 * ntotal
++//          (#rows = sum of levels[i]: one row per node and level it is on;
++//          the last term is the per-node level)
++//   NSG  : 4 * (#edges) + 4 * (N + 1)
++// ------------------------------------------------------------
++
++inline size_t hnsw_graph_bytes_compact(const faiss::HNSW& h) {
++    size_t edges = 0;
++    for (size_t i = 0; i < h.neighbors.size(); i++) {
++        if (h.neighbors[i] >= 0) {
++            edges++;
++        }
++    }
++    size_t rows = 0;
++    for (int lvl : h.levels) {
++        rows += lvl;
++    }
++    return sizeof(int32_t) * (edges + rows + 1 + h.levels.size());
++}
++
++inline size_t nsg_graph_bytes_compact(const faiss::NSG& nsg) {
++    if (!nsg.is_built || !nsg.final_graph) {
++        return 0;
++    }
++    const auto& g = *nsg.final_graph;
++    size_t edges = 0;
++    for (int i = 0; i < g.N; i++) {
++        for (int j = 0; j < g.K && g.at(i, j) >= 0; j++) {
++            edges++;
++        }
++    }
++    return sizeof(int32_t) * (edges + static_cast<size_t>(g.N) + 1);
++}
++
+ // ------------------------------------------------------------
+ // Process RSS (resident set size) in bytes, read from
+ // /proc/self/status. Linux-only. Use as a sanity check on the
+@@ -159,6 +203,9 @@ struct IndexSizeReport {
+     size_t storage_bytes = 0;
+     size_t hnsw_graph_overhead_bytes = 0;
+     size_t nsg_graph_overhead_bytes = 0;
++    // compact (CSR) size of the two graphs, see hnsw_graph_bytes_compact()
++    size_t hnsw_graph_compact_bytes = 0;
++    size_t nsg_graph_compact_bytes = 0;
+     size_t combined_bytes = 0; // storage counted once + both graphs
+     size_t unshared_total_bytes = 0; // what it would cost with two
+                                       // independent copies of storage
+@@ -174,6 +221,8 @@ inline IndexSizeReport report_index_sizes(
+     r.storage_bytes = flat_storage_bytes_direct(shared_storage);
+     r.hnsw_graph_overhead_bytes = hnsw_graph_bytes_direct(hnsw.hnsw);
+     r.nsg_graph_overhead_bytes = nsg_graph_bytes_direct(nsg.nsg);
++    r.hnsw_graph_compact_bytes = hnsw_graph_bytes_compact(hnsw.hnsw);
++    r.nsg_graph_compact_bytes = nsg_graph_bytes_compact(nsg.nsg);
+     r.combined_bytes = r.storage_bytes + r.hnsw_graph_overhead_bytes +
+             r.nsg_graph_overhead_bytes;
+     r.unshared_total_bytes = 2 * r.storage_bytes +
+@@ -191,6 +240,10 @@ inline IndexSizeReport report_index_sizes(
+               << " bytes (" << MB(r.hnsw_graph_overhead_bytes) << " MB)\n";
+     std::cout << "  NSG  graph overhead    : " << r.nsg_graph_overhead_bytes
+               << " bytes (" << MB(r.nsg_graph_overhead_bytes) << " MB)\n";
++    std::cout << "  HNSW graph, compact CSR: " << r.hnsw_graph_compact_bytes
++              << " bytes (" << MB(r.hnsw_graph_compact_bytes) << " MB)\n";
++    std::cout << "  NSG  graph, compact CSR: " << r.nsg_graph_compact_bytes
++              << " bytes (" << MB(r.nsg_graph_compact_bytes) << " MB)\n";
+     std::cout << "  Combined (storage x1)  : " << r.combined_bytes
+               << " bytes (" << MB(r.combined_bytes) << " MB)\n";
+     std::cout << "  If storage were NOT shared, total would be "
+diff --git a/faiss/CMakeLists.txt b/faiss/CMakeLists.txt
+index 1a4a30a..e286e42 100644
+--- a/faiss/CMakeLists.txt
++++ b/faiss/CMakeLists.txt
+@@ -295,6 +295,7 @@ set(FAISS_HEADERS
+   impl/FaissAssert.h
+   impl/FaissException.h
+   impl/HNSW.h
++  impl/LeannPrune.h
+   impl/hnsw/LockVector.h
+   impl/hnsw/MinimaxHeap.h
+   impl/LocalSearchQuantizer.h
+diff --git a/faiss/IndexHNSW.cpp b/faiss/IndexHNSW.cpp
+index 0fd1877..07fcbb8 100644
+--- a/faiss/IndexHNSW.cpp
++++ b/faiss/IndexHNSW.cpp
+@@ -793,6 +793,29 @@ void IndexHNSW::shrink_level_0_neighbors(int new_size) {
+     }
+ }
+ 
++LeannPruneStats IndexHNSW::prune_leann(const LeannPruneParams& params) {
++    FAISS_THROW_IF_NOT_MSG(
++            storage,
++            "Please use IndexHNSWFlat (or variants) instead of IndexHNSW directly");
++    FAISS_THROW_IF_NOT_MSG(ntotal > 0, "cannot prune an empty index");
++    FAISS_THROW_IF_NOT_MSG(
++            hnsw.levels.size() == static_cast<size_t>(ntotal),
++            "the HNSW graph does not cover all stored vectors");
++
++    return hnsw_prune_leann(
++            hnsw,
++            params,
++            [this] { return storage_distance_computer(storage); },
++            [this](DistanceComputer& dc, HNSW::storage_idx_t pt_id) {
++                // the distance computer keeps a pointer to the query, so it
++                // has to stay valid until the next call from the same thread
++                thread_local std::vector<float> query;
++                query.resize(storage->d);
++                storage->reconstruct(pt_id, query.data());
++                dc.set_query(query.data());
++            });
++}
++
+ void IndexHNSW::search_level_0(
+         idx_t n,
+         const float* x,
+diff --git a/faiss/IndexHNSW.h b/faiss/IndexHNSW.h
+index ef24e09..e2f0412 100644
+--- a/faiss/IndexHNSW.h
++++ b/faiss/IndexHNSW.h
+@@ -100,6 +100,18 @@ struct IndexHNSW : Index {
+ 
+     void shrink_level_0_neighbors(int size);
+ 
++    /** LEANN-style high-degree preserving pruning of the level-0 graph
++     * (Wang et al. 2025, Algorithm 3): a small fraction of hub nodes keeps a
++     * large neighbor budget, all other nodes keep a small one, and reverse
++     * edges still let every node link to the hubs. Upper levels are kept.
++     * Works in place on a built index; needs the stored vectors (or their
++     * codes) to re-select the neighbors. See LeannPruneParams.
++     *
++     * @return degree / size statistics of the pruned graph
++     */
++    LeannPruneStats prune_leann(
++            const LeannPruneParams& params = LeannPruneParams());
++
+     /** Perform search only on level 0, given the starting points for
+      * each vertex.
+      *
+diff --git a/faiss/IndexNSG.cpp b/faiss/IndexNSG.cpp
+index 0d4324e..ec0b276 100644
+--- a/faiss/IndexNSG.cpp
++++ b/faiss/IndexNSG.cpp
+@@ -242,6 +242,15 @@ void IndexNSG::add(idx_t n, const float* x) {
+     is_built = true;
+ }
+ 
++LeannPruneStats IndexNSG::prune_leann(const LeannPruneParams& params) {
++    FAISS_THROW_IF_NOT_MSG(
++            storage,
++            "Please use IndexNSGFlat (or variants) "
++            "instead of IndexNSG directly");
++    FAISS_THROW_IF_NOT_MSG(is_built, "the IndexNSG is not built yet");
++    return nsg.prune_leann(storage, params);
++}
++
+ void IndexNSG::add_links_only(idx_t n, const float* x) {
+     FAISS_THROW_IF_NOT_MSG(
+             storage,
+diff --git a/faiss/IndexNSG.h b/faiss/IndexNSG.h
+index 8904814..2e082a4 100644
+--- a/faiss/IndexNSG.h
++++ b/faiss/IndexNSG.h
+@@ -74,6 +74,17 @@ struct IndexNSG : Index {
+     void reset() override;
+ 
+     void check_knn_graph(const idx_t* knn_graph, idx_t n, int K) const;
++
++    /** LEANN-style high-degree preserving pruning of the built graph, in
++     * place (adapted from Wang et al. 2025, Algorithm 3). Hubs keep their
++     * edges, every other node keeps its edges into hubs and then its nearest
++     * ones, up to a small budget. See NSG::prune_leann and LeannPruneParams.
++     * Needs the stored vectors to order the edges.
++     *
++     * @return degree / size statistics of the pruned graph
++     */
++    LeannPruneStats prune_leann(
++            const LeannPruneParams& params = LeannPruneParams());
+ };
+ 
+ /** Flat index topped with with a NSG structure to access elements
+diff --git a/faiss/impl/HNSW.cpp b/faiss/impl/HNSW.cpp
+index 4b07c10..bd01df2 100644
+--- a/faiss/impl/HNSW.cpp
++++ b/faiss/impl/HNSW.cpp
+@@ -7,15 +7,22 @@
+ 
+ #include <faiss/impl/HNSW.h>
+ 
++#include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cinttypes>
++#include <cmath>
+ #include <cstddef>
+ #include <cstdlib>
++#include <exception>
++#include <memory>
++#include <numeric>
+ #include <type_traits>
+ 
+ #include <faiss/IndexHNSW.h>
+ 
+ #include <faiss/impl/DistanceComputer.h>
++#include <faiss/impl/FaissException.h>
+ #include <faiss/impl/IDSelector.h>
+ #include <faiss/impl/ResultHandler.h>
+ #include <faiss/impl/VisitedTable.h>
+@@ -1089,6 +1096,497 @@ void HNSW::merge_reverse_links_deterministic(
+     }
+ }
+ 
++/**************************************************************
++ * LEANN-style high-degree preserving pruning
++ **************************************************************/
++
++namespace {
++
++/// restores hnsw.efConstruction on scope exit (the pass may override it)
++struct EfConstructionGuard {
++    HNSW& hnsw;
++    int saved;
++    explicit EfConstructionGuard(HNSW& h) : hnsw(h), saved(h.efConstruction) {}
++    ~EfConstructionGuard() {
++        hnsw.efConstruction = saved;
++    }
++};
++
++template <class C>
++LeannPruneStats hnsw_prune_leann_impl(
++        HNSW& hnsw,
++        const LeannPruneParams& params,
++        const std::function<DistanceComputer*()>& make_distance_computer,
++        const std::function<void(DistanceComputer&, storage_idx_t)>&
++                set_query) {
++    const int64_t n = static_cast<int64_t>(hnsw.levels.size());
++    FAISS_THROW_IF_NOT_MSG(
++            n > 0 && hnsw.entry_point >= 0, "cannot prune an empty HNSW");
++    FAISS_THROW_IF_NOT(hnsw.offsets.size() == static_cast<size_t>(n) + 1);
++    FAISS_THROW_IF_NOT_MSG(
++            params.hub_fraction >= 0.0f && params.hub_fraction <= 1.0f,
++            "hub_fraction must be in [0, 1]");
++
++    const int slots = hnsw.nb_neighbors(0);
++    const int M_hub = params.hub_max_degree > 0 ? params.hub_max_degree : slots;
++    FAISS_THROW_IF_NOT_FMT(
++            M_hub <= slots,
++            "hub_max_degree=%d exceeds the %d level-0 slots of this HNSW",
++            M_hub,
++            slots);
++    const int m_low = params.low_max_degree > 0 ? params.low_max_degree
++                                                : std::max(1, M_hub / 5);
++    FAISS_THROW_IF_NOT_FMT(
++            m_low <= M_hub,
++            "low_max_degree=%d must not exceed hub_max_degree=%d",
++            m_low,
++            M_hub);
++    // reverse edges that overflow a list re-prune it to this size
++    const int reverse_cap = std::max(
++            1,
++            static_cast<int>(
++                    M_hub -
++                    M_hub * std::clamp(params.reverse_headroom, 0.0f, 0.5f)));
++
++    LeannPruneStats stats;
++    stats.n_nodes = n;
++    stats.hub_max_degree = M_hub;
++    stats.low_max_degree = m_low;
++
++    // ---- degrees of the original graph ------------------------------------
++    std::vector<int> out_deg(n, 0);
++    std::vector<int> in_deg(n, 0);
++    size_t edges_before = 0;
++    int max_before = 0;
++#pragma omp parallel for reduction(+ : edges_before) reduction(max : max_before)
++    for (int64_t i = 0; i < n; i++) {
++        size_t begin, end;
++        hnsw.neighbor_range(i, 0, &begin, &end);
++        int deg = 0;
++        for (size_t j = begin; j < end; j++) {
++            storage_idx_t nb = hnsw.neighbors[j];
++            if (nb < 0) {
++                break;
++            }
++            deg++;
++#pragma omp atomic
++            in_deg[nb]++;
++        }
++        out_deg[i] = deg;
++        edges_before += deg;
++        max_before = std::max(max_before, deg);
++    }
++    stats.edges_before = edges_before;
++    stats.avg_degree_before = double(edges_before) / n;
++    stats.max_degree_before = max_before;
++
++    // ---- pick the hubs: top hub_fraction nodes by degree ------------------
++    std::vector<uint8_t> is_hub;
++    size_t n_hubs = leann_select_hubs(
++            out_deg, in_deg, params.hub_score, params.hub_fraction, is_hub);
++    // the search always starts here, keep it well connected
++    if (!is_hub[hnsw.entry_point]) {
++        is_hub[hnsw.entry_point] = 1;
++        n_hubs++;
++    }
++    stats.n_hubs = n_hubs;
++
++    if (params.verbose) {
++        printf("hnsw_prune_leann: n=%" PRId64
++               " hubs=%zd M=%d m=%d level-0 slots=%d "
++               "avg degree before=%.2f\n",
++               n,
++               n_hubs,
++               M_hub,
++               m_low,
++               slots,
++               stats.avg_degree_before);
++    }
++
++    // ---- re-insert every node into an emptied level 0 --------------------
++    // The level-0 lists are rebuilt the way the deterministic HNSW build does
++    // it (buckets by level, highest first, prefix-doubling batches: phase A
++    // searches the frozen partial graph, phase B merges reverse edges), so
++    // that every node connects to nodes that are already in the graph and
++    // the result does not depend on the thread count. What differs is that
++    // the neighbor budget depends on the node: hubs pick up to M_hub edges,
++    // the others m_low; reverse edges may grow any list up to M_hub. The
++    // upper levels are left as they are: they stay valid because a node of
++    // level L only ever descends through levels > L, whose nodes are all
++    // inserted before it.
++    EfConstructionGuard ef_guard(hnsw);
++    if (params.candidate_pool_size > 0) {
++        hnsw.efConstruction = params.candidate_pool_size;
++    }
++
++    FAISS_THROW_IF_NOT(hnsw.levels[hnsw.entry_point] - 1 == hnsw.max_level);
++    const int top_level = hnsw.max_level;
++
++#pragma omp parallel for
++    for (int64_t i = 0; i < n; i++) {
++        size_t begin, end;
++        hnsw.neighbor_range(i, 0, &begin, &end);
++        for (size_t j = begin; j < end; j++) {
++            hnsw.neighbors[j] = -1;
++        }
++    }
++
++    // bucket the nodes by level, highest first: the nodes of level l are
++    // order[bucket_begin[l] .. bucket_begin[l] + bucket_size[l])
++    std::vector<size_t> bucket_size(top_level + 1, 0);
++    for (int64_t i = 0; i < n; i++) {
++        bucket_size[hnsw.levels[i] - 1]++;
++    }
++    std::vector<size_t> bucket_begin(top_level + 1, 0);
++    for (int l = top_level - 1; l >= 0; l--) {
++        bucket_begin[l] = bucket_begin[l + 1] + bucket_size[l + 1];
++    }
++    std::vector<storage_idx_t> order(n);
++    {
++        std::vector<size_t> pos = bucket_begin;
++        for (int64_t i = 0; i < n; i++) {
++            order[pos[hnsw.levels[i] - 1]++] = static_cast<storage_idx_t>(i);
++        }
++    }
++
++    // a batch is at most 2% of the index (ParlayANN's theta)
++    const size_t theta = std::max<size_t>(1, static_cast<size_t>(0.02 * n));
++    RandomGenerator rng2(789);
++
++    const int max_threads = omp_get_max_threads();
++    std::vector<std::vector<std::pair<storage_idx_t, storage_idx_t>>> rev_local(
++            max_threads);
++    std::vector<std::pair<storage_idx_t, storage_idx_t>> rev_edges;
++
++    std::exception_ptr ex;
++    std::atomic<bool> interrupt{false};
++
++    for (int pt_level = top_level; pt_level >= 0; pt_level--) {
++        const size_t i0 = bucket_begin[pt_level];
++        const size_t i1 = i0 + bucket_size[pt_level];
++        if (i0 == i1) {
++            continue;
++        }
++
++        // random permutation to get rid of dataset order bias
++        for (size_t j = i0; j < i1; j++) {
++            std::swap(
++                    order[j],
++                    order[j + rng2.rand_int(static_cast<int>(i1 - j))]);
++        }
++        if (pt_level == top_level) {
++            // the entry point goes in first
++            auto it = std::find(
++                    order.begin() + i0, order.begin() + i1, hnsw.entry_point);
++            FAISS_THROW_IF_NOT(it != order.begin() + i1);
++            std::swap(order[i0], *it);
++        }
++
++        size_t s = i0;
++        while (s < i1) {
++            const size_t done = s - i0;
++            const size_t grow = std::min(done == 0 ? size_t(1) : done, theta);
++            const size_t e = std::min(i1, s + grow);
++
++            // ---- phase A: forward links against the frozen graph ----------
++            for (auto& r : rev_local) {
++                r.clear();
++            }
++#pragma omp parallel if (e - s > 100)
++            {
++                std::unique_ptr<VisitedTable> vt;
++                std::unique_ptr<DistanceComputer> dis;
++                try {
++                    vt = VisitedTable::create(n, hnsw.use_visited_hashset);
++                    dis.reset(make_distance_computer());
++                } catch (...) {
++                    omp_capture_exception(ex, [&] { interrupt = true; });
++                }
++                auto& my_rev = rev_local[omp_get_thread_num()];
++
++#pragma omp for schedule(dynamic, 16)
++                for (int64_t idx = s; idx < static_cast<int64_t>(e); idx++) {
++                    if (interrupt.load(std::memory_order_relaxed)) {
++                        continue;
++                    }
++                    try {
++                        const storage_idx_t v = order[idx];
++                        set_query(*dis, v);
++
++                        storage_idx_t nearest = hnsw.entry_point;
++                        float d_nearest = (*dis)(nearest);
++                        for (int level = hnsw.max_level; level > pt_level;
++                             level--) {
++                            greedy_update_nearest_impl<C>(
++                                    hnsw, *dis, level, nearest, d_nearest);
++                        }
++
++                        std::priority_queue<HNSW::NodeDistCloserT<C>> results;
++                        search_neighbors_to_add_dispatch<C>(
++                                hnsw,
++                                *dis,
++                                results,
++                                nearest,
++                                d_nearest,
++                                0,
++                                *vt,
++                                false);
++
++                        // v is not linked yet, but it is its own candidate
++                        // when it is the entry point
++                        std::priority_queue<HNSW::NodeDistFartherT<C>> input;
++                        while (!results.empty()) {
++                            const auto& top = results.top();
++                            if (top.id != v) {
++                                input.emplace(top.d, top.id);
++                            }
++                            results.pop();
++                        }
++
++                        std::vector<HNSW::NodeDistFartherT<C>> kept;
++                        HNSW::shrink_neighbor_list<C>(
++                                *dis,
++                                input,
++                                kept,
++                                is_hub[v] ? M_hub : m_low,
++                                false);
++
++                        size_t begin, end;
++                        hnsw.neighbor_range(v, 0, &begin, &end);
++                        size_t j = begin;
++                        for (const auto& nb : kept) {
++                            hnsw.neighbors[j++] = nb.id;
++                            my_rev.emplace_back(nb.id, v);
++                        }
++                    } catch (...) {
++                        omp_capture_exception(ex, [&] { interrupt = true; });
++                    }
++                }
++            }
++            omp_rethrow_if_exception(ex);
++
++            // ---- phase B: merge the reverse edges, grouped by destination -
++            rev_edges.clear();
++            for (auto& r : rev_local) {
++                rev_edges.insert(rev_edges.end(), r.begin(), r.end());
++            }
++            std::sort(rev_edges.begin(), rev_edges.end());
++            std::vector<size_t> group_start;
++            for (size_t i = 0; i < rev_edges.size(); i++) {
++                if (i == 0 || rev_edges[i].first != rev_edges[i - 1].first) {
++                    group_start.push_back(i);
++                }
++            }
++            group_start.push_back(rev_edges.size());
++            const int64_t n_groups =
++                    static_cast<int64_t>(group_start.size()) - 1;
++
++#pragma omp parallel if (n_groups > 100)
++            {
++                std::unique_ptr<DistanceComputer> dis;
++                try {
++                    dis.reset(make_distance_computer());
++                } catch (...) {
++                    omp_capture_exception(ex, [&] { interrupt = true; });
++                }
++                std::vector<std::pair<float, storage_idx_t>> arr, kept;
++
++#pragma omp for schedule(dynamic, 16)
++                for (int64_t g = 0; g < n_groups; g++) {
++                    if (interrupt.load(std::memory_order_relaxed)) {
++                        continue;
++                    }
++                    try {
++                        const storage_idx_t u = rev_edges[group_start[g]].first;
++                        size_t begin, end;
++                        hnsw.neighbor_range(u, 0, &begin, &end);
++
++                        arr.clear();
++                        size_t n_cur = 0;
++                        for (size_t j = begin; j < end; j++, n_cur++) {
++                            if (hnsw.neighbors[j] < 0) {
++                                break;
++                            }
++                            arr.emplace_back(0.0f, hnsw.neighbors[j]);
++                        }
++                        for (size_t k = group_start[g]; k < group_start[g + 1];
++                             k++) {
++                            const storage_idx_t v = rev_edges[k].second;
++                            if (v == u) {
++                                continue;
++                            }
++                            bool present = false;
++                            for (size_t j = 0; j < n_cur; j++) {
++                                if (arr[j].second == v) {
++                                    present = true;
++                                    break;
++                                }
++                            }
++                            if (!present) {
++                                arr.emplace_back(0.0f, v);
++                            }
++                        }
++                        for (auto& cand : arr) {
++                            cand.first = dis->symmetric_dis(u, cand.second);
++                        }
++                        // nearest first, ties by id (order-independent)
++                        std::sort(
++                                arr.begin(),
++                                arr.end(),
++                                [](const std::pair<float, storage_idx_t>& a,
++                                   const std::pair<float, storage_idx_t>& b) {
++                                    if (a.first != b.first) {
++                                        return C::cmp(b.first, a.first);
++                                    }
++                                    return a.second < b.second;
++                                });
++
++                        const std::vector<std::pair<float, storage_idx_t>>*
++                                out = &arr;
++                        if (arr.size() > static_cast<size_t>(M_hub)) {
++                            // overflow: HNSW's RNG heuristic, down to the cap
++                            kept.clear();
++                            for (const auto& cand : arr) {
++                                bool good = true;
++                                for (const auto& kp : kept) {
++                                    float d_kc = dis->symmetric_dis(
++                                            kp.second, cand.second);
++                                    if (C::cmp(cand.first, d_kc)) {
++                                        good = false;
++                                        break;
++                                    }
++                                }
++                                if (good) {
++                                    kept.push_back(cand);
++                                    if (kept.size() >=
++                                        static_cast<size_t>(reverse_cap)) {
++                                        break;
++                                    }
++                                }
++                            }
++                            out = &kept;
++                        }
++
++                        size_t j = begin;
++                        for (const auto& cand : *out) {
++                            hnsw.neighbors[j++] = cand.second;
++                        }
++                        while (j < end) {
++                            hnsw.neighbors[j++] = -1;
++                        }
++                    } catch (...) {
++                        omp_capture_exception(ex, [&] { interrupt = true; });
++                    }
++                }
++            }
++            omp_rethrow_if_exception(ex);
++
++            s = e;
++        }
++    }
++
++    // ---- statistics of the pruned graph -----------------------------------
++    std::fill(in_deg.begin(), in_deg.end(), 0);
++    size_t edges_after = 0, hub_edges = 0;
++    int max_after = 0;
++    for (int64_t i = 0; i < n; i++) {
++        size_t begin, end;
++        hnsw.neighbor_range(i, 0, &begin, &end);
++        int deg = 0;
++        for (size_t j = begin; j < end; j++) {
++            storage_idx_t nb = hnsw.neighbors[j];
++            if (nb < 0) {
++                break;
++            }
++            deg++;
++            in_deg[nb]++;
++        }
++        edges_after += deg;
++        if (is_hub[i]) {
++            hub_edges += deg;
++        }
++        max_after = std::max(max_after, deg);
++    }
++    stats.edges_after = edges_after;
++    stats.avg_degree_after = double(edges_after) / n;
++    stats.max_degree_after = max_after;
++    stats.avg_degree_hubs_after = n_hubs ? double(hub_edges) / n_hubs : 0.0;
++    stats.avg_degree_non_hubs_after = n > int64_t(n_hubs)
++            ? double(edges_after - hub_edges) / (n - n_hubs)
++            : 0.0;
++    for (int64_t i = 0; i < n; i++) {
++        if (in_deg[i] == 0 && i != hnsw.entry_point) {
++            stats.n_zero_indegree_after++;
++        }
++    }
++    stats.edge_bytes_before = edges_before * sizeof(storage_idx_t);
++    stats.edge_bytes_after = edges_after * sizeof(storage_idx_t);
++
++    { // reachability on level 0 from the places a search can start
++        std::vector<uint8_t> seen(n, 0);
++        std::vector<storage_idx_t> frontier;
++        auto push = [&](storage_idx_t i) {
++            if (!seen[i]) {
++                seen[i] = 1;
++                frontier.push_back(i);
++            }
++        };
++        push(hnsw.entry_point);
++        for (int64_t i = 0; i < n; i++) {
++            if (hnsw.levels[i] > 1) {
++                push(static_cast<storage_idx_t>(i));
++            }
++        }
++        size_t n_seen = frontier.size();
++        while (!frontier.empty()) {
++            storage_idx_t u = frontier.back();
++            frontier.pop_back();
++            size_t begin, end;
++            hnsw.neighbor_range(u, 0, &begin, &end);
++            for (size_t j = begin; j < end && hnsw.neighbors[j] >= 0; j++) {
++                storage_idx_t v = hnsw.neighbors[j];
++                if (!seen[v]) {
++                    seen[v] = 1;
++                    n_seen++;
++                    frontier.push_back(v);
++                }
++            }
++        }
++        stats.n_unreachable_after = n - n_seen;
++    }
++
++    if (params.verbose) {
++        printf("hnsw_prune_leann: avg degree %.2f -> %.2f "
++               "(hubs %.2f, others %.2f), max degree %d -> %d, "
++               "%zd nodes without in-edges, %zd unreachable\n",
++               stats.avg_degree_before,
++               stats.avg_degree_after,
++               stats.avg_degree_hubs_after,
++               stats.avg_degree_non_hubs_after,
++               stats.max_degree_before,
++               stats.max_degree_after,
++               stats.n_zero_indegree_after,
++               stats.n_unreachable_after);
++    }
++    return stats;
++}
++
++} // namespace
++
++LeannPruneStats hnsw_prune_leann(
++        HNSW& hnsw,
++        const LeannPruneParams& params,
++        const std::function<DistanceComputer*()>& make_distance_computer,
++        const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
++                set_query) {
++    if (hnsw.is_similarity) {
++        return hnsw_prune_leann_impl<HNSW::C_similarity>(
++                hnsw, params, make_distance_computer, set_query);
++    }
++    return hnsw_prune_leann_impl<HNSW::C_distance>(
++            hnsw, params, make_distance_computer, set_query);
++}
++
+ /**************************************************************
+  * Searching
+  **************************************************************/
+diff --git a/faiss/impl/HNSW.h b/faiss/impl/HNSW.h
+index 958424d..81bfb69 100644
+--- a/faiss/impl/HNSW.h
++++ b/faiss/impl/HNSW.h
+@@ -18,6 +18,7 @@
+ #include <faiss/Index.h>
+ #include <faiss/impl/DistanceComputer.h>
+ #include <faiss/impl/FaissAssert.h>
++#include <faiss/impl/LeannPrune.h>
+ #include <faiss/impl/maybe_owned_vector.h>
+ #include <faiss/utils/Heap.h>
+ #include <faiss/utils/random.h>
+@@ -299,6 +300,34 @@ void hnsw_add_vertices_deterministic(
+         const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
+                 set_query);
+ 
++/** LEANN-style high-degree preserving pruning of the level-0 graph
++ * (LEANN, Wang et al. 2025, Section 5 / Algorithm 3), shared by IndexHNSW.
++ *
++ * Every node's level-0 neighbor list is re-selected from the original graph:
++ *  - the top `hub_fraction` nodes by degree (the hubs) keep up to
++ *    `hub_max_degree` (M) neighbors, all other nodes pick only
++ *    `low_max_degree` (m) neighbors, with HNSW's usual RNG heuristic;
++ *  - every chosen edge is added in both directions, and any node may grow up
++ *    to `hub_max_degree` through reverse edges (re-pruned with the same
++ *    heuristic when it overflows), so every node keeps access to the hubs.
++ * The upper levels are left untouched. The candidate neighbors of node v are
++ * found by searching the original graph (efConstruction, or
++ * `candidate_pool_size`), so the result does not depend on insertion order and
++ * the pass is parallel and deterministic.
++ *
++ * The neighbor table keeps its fixed-size, -1 padded layout; use the returned
++ * statistics (edge_bytes_after) for the size of a compact CSR encoding.
++ *
++ * `make_distance_computer()` returns a fresh DistanceComputer per thread
++ * (caller-owned) and `set_query(dc, pt_id)` points it at pt_id's vector.
++ */
++LeannPruneStats hnsw_prune_leann(
++        HNSW& hnsw,
++        const LeannPruneParams& params,
++        const std::function<DistanceComputer*()>& make_distance_computer,
++        const std::function<void(DistanceComputer&, HNSW::storage_idx_t)>&
++                set_query);
++
+ struct HNSWStats {
+     size_t n1 = 0; /// number of vectors searched
+     size_t n2 =
+diff --git a/faiss/impl/LeannPrune.h b/faiss/impl/LeannPrune.h
+new file mode 100644
+index 0000000..c913193
+--- /dev/null
++++ b/faiss/impl/LeannPrune.h
+@@ -0,0 +1,173 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <numeric>
++#include <vector>
++
++namespace faiss {
++
++/** High-degree preserving graph pruning, following the LEANN paper
++ *
++ *   "LEANN: A Low-Storage Overhead Vector Index", Wang et al., 2025
++ *   (Section 5, Algorithm 3)
++ *
++ * Idea: a small fraction `hub_fraction` (beta) of the nodes are "hubs", the
++ * nodes that a graph search visits most often. Hubs keep a large out-degree
++ * budget (`hub_max_degree`, "M" in the paper); all other nodes get a small
++ * one (`low_max_degree`, "m" in the paper, m = M / 5), and every node keeps a
++ * route into the hubs.
++ *
++ * The same parameters are used for HNSW (level 0) and NSG:
++ *
++ *  - IndexHNSW::prune_leann is the paper's algorithm: the level-0 lists are
++ *    rebuilt by re-inserting all nodes, hubs choosing up to M neighbors and
++ *    the others m; every edge is also added in reverse and may grow any node
++ *    up to M.
++ *  - IndexNSG::prune_leann is an adaptation: NSG's edges are pruned in
++ *    place, hubs keep their edges, the others keep their edges into hubs and
++ *    then their nearest ones, up to m.
++ *
++ * Neither changes the in-memory layout of the graph (fixed-size, -1 padded
++ * neighbor tables): the savings show up in LeannPruneStats::edge_bytes_after,
++ * the size of the neighbor ids in a compact (CSR) encoding.
++ */
++
++/// How a node's importance ("hub-ness") is estimated on the *original* graph.
++enum LeannHubScore : int {
++    /// out-degree in the original graph (what the paper does)
++    LEANN_HUB_OUT_DEGREE = 0,
++    /// in-degree in the original graph (how often a node is pointed to)
++    LEANN_HUB_IN_DEGREE = 1,
++    /// out-degree + in-degree
++    LEANN_HUB_TOTAL_DEGREE = 2,
++};
++
++struct LeannPruneParams {
++    /// fraction of nodes that are kept as high-degree hubs (beta, paper: 2%).
++    /// 0 => no hub; 1 => every node is a hub.
++    float hub_fraction = 0.02f;
++
++    /// max out-degree of hubs (M in the paper); for HNSW also the cap that
++    /// reverse edges may grow any node to.
++    /// 0 => the widest the graph can hold (2*M for HNSW level 0, R for NSG).
++    int hub_max_degree = 0;
++
++    /// max out-degree of the edges a non-hub node picks for itself
++    /// (m in the paper). For HNSW, reverse edges can add to it.
++    /// 0 => hub_max_degree / 5.
++    int low_max_degree = 0;
++
++    /// how the hubs are selected on the original graph
++    LeannHubScore hub_score = LEANN_HUB_OUT_DEGREE;
++
++    /// HNSW only: size of the candidate list used to select the neighbors of
++    /// every re-inserted node. 0 => HNSW::efConstruction.
++    int candidate_pool_size = 0;
++
++    /// HNSW only: when a reverse edge overflows a node's list, prune it to
++    /// hub_max_degree * (1 - reverse_headroom). 0 reproduces the paper
++    /// ("shrink to M"). A positive value trades a slightly lower degree for
++    /// fewer re-prunes.
++    float reverse_headroom = 0.0f;
++
++    /// print progress and degree statistics
++    bool verbose = false;
++};
++
++/// Result of a pruning pass. Degrees are out-degrees on the pruned layer
++/// (HNSW: level 0, NSG: the whole graph).
++struct LeannPruneStats {
++    size_t n_nodes = 0;
++    size_t n_hubs = 0;
++
++    // effective parameters that were used
++    int hub_max_degree = 0;
++    int low_max_degree = 0;
++
++    size_t edges_before = 0;
++    size_t edges_after = 0;
++    double avg_degree_before = 0;
++    double avg_degree_after = 0;
++    int max_degree_before = 0;
++    int max_degree_after = 0;
++
++    /// out-degree of hubs / non-hubs after pruning
++    double avg_degree_hubs_after = 0;
++    double avg_degree_non_hubs_after = 0;
++
++    /// nodes without any incoming edge after pruning
++    size_t n_zero_indegree_after = 0;
++
++    /// nodes that a graph traversal cannot reach after pruning. HNSW: not
++    /// reachable on level 0 from the entry point or from any node of the
++    /// upper levels (where a search lands after its descent). NSG: not
++    /// reachable from the navigating node (the pass re-attaches such nodes,
++    /// so this is 0).
++    size_t n_unreachable_after = 0;
++
++    /// bytes of the neighbor ids if the graph were stored compactly (CSR,
++    /// 4 bytes per id, no padding). The in-memory HNSW/NSG arrays keep their
++    /// fixed-size, -1 padded layout, so their footprint does not change.
++    size_t edge_bytes_before = 0;
++    size_t edge_bytes_after = 0;
++};
++
++/** Mark the top `hub_fraction` nodes by hub score in `is_hub` (resized to n).
++ * Ties are broken by node id, so the selection is deterministic.
++ * @return the number of hubs selected
++ */
++inline size_t leann_select_hubs(
++        const std::vector<int>& out_degree,
++        const std::vector<int>& in_degree,
++        LeannHubScore score_kind,
++        float hub_fraction,
++        std::vector<uint8_t>& is_hub) {
++    const size_t n = out_degree.size();
++    is_hub.assign(n, 0);
++    size_t n_hubs = static_cast<size_t>(
++            std::ceil(static_cast<double>(hub_fraction) * double(n)));
++    n_hubs = std::min(n_hubs, n);
++    if (n_hubs == n) {
++        std::fill(is_hub.begin(), is_hub.end(), 1);
++        return n_hubs;
++    }
++    if (n_hubs == 0) {
++        return 0;
++    }
++    auto score = [&](size_t i) -> int64_t {
++        switch (score_kind) {
++            case LEANN_HUB_IN_DEGREE:
++                return in_degree[i];
++            case LEANN_HUB_TOTAL_DEGREE:
++                return int64_t(in_degree[i]) + out_degree[i];
++            default:
++                return out_degree[i];
++        }
++    };
++    std::vector<size_t> order(n);
++    std::iota(order.begin(), order.end(), size_t(0));
++    std::nth_element(
++            order.begin(),
++            order.begin() + n_hubs,
++            order.end(),
++            [&](size_t a, size_t b) {
++                int64_t sa = score(a), sb = score(b);
++                return sa != sb ? sa > sb : a < b;
++            });
++    for (size_t k = 0; k < n_hubs; k++) {
++        is_hub[order[k]] = 1;
++    }
++    return n_hubs;
++}
++
++} // namespace faiss
+diff --git a/faiss/impl/NSG.cpp b/faiss/impl/NSG.cpp
+index a2d4118..afceacd 100644
+--- a/faiss/impl/NSG.cpp
++++ b/faiss/impl/NSG.cpp
+@@ -8,12 +8,16 @@
+ #include <faiss/impl/NSG.h>
+ 
+ #include <algorithm>
++#include <atomic>
++#include <cinttypes>
++#include <exception>
+ #include <limits>
+ #include <memory>
+ #include <mutex>
+ #include <stack>
+ 
+ #include <faiss/impl/DistanceComputer.h>
++#include <faiss/impl/FaissException.h>
+ #include <faiss/impl/VisitedTable.h>
+ 
+ namespace faiss {
+@@ -672,4 +676,223 @@ void NSG::check_graph() const {
+     }
+ }
+ 
++/**************************************************************
++ * LEANN-style high-degree preserving pruning
++ **************************************************************/
++
++LeannPruneStats NSG::prune_leann(
++        Index* storage,
++        const LeannPruneParams& params) {
++    FAISS_THROW_IF_NOT_MSG(is_built && final_graph, "NSG is not built");
++    FAISS_THROW_IF_NOT(storage);
++    FAISS_THROW_IF_NOT_MSG(
++            params.hub_fraction >= 0.0f && params.hub_fraction <= 1.0f,
++            "hub_fraction must be in [0, 1]");
++
++    const int n = ntotal;
++    const int M_hub = params.hub_max_degree > 0 ? params.hub_max_degree : R;
++    FAISS_THROW_IF_NOT_FMT(
++            M_hub <= R, "hub_max_degree=%d exceeds R=%d of this NSG", M_hub, R);
++    const int m_low = params.low_max_degree > 0 ? params.low_max_degree
++                                                : std::max(1, M_hub / 5);
++    FAISS_THROW_IF_NOT_FMT(
++            m_low <= M_hub,
++            "low_max_degree=%d must not exceed hub_max_degree=%d",
++            m_low,
++            M_hub);
++
++    LeannPruneStats stats;
++    stats.n_nodes = n;
++    stats.hub_max_degree = M_hub;
++    stats.low_max_degree = m_low;
++
++    nsg::Graph<int>& g = *final_graph;
++
++    // ---- degrees of the original graph ------------------------------------
++    std::vector<int> out_deg(n, 0);
++    std::vector<int> in_deg(n, 0);
++    size_t edges_before = 0;
++    int max_before = 0;
++#pragma omp parallel for reduction(+ : edges_before) reduction(max : max_before)
++    for (int i = 0; i < n; i++) {
++        int deg = 0;
++        for (int j = 0; j < R; j++) {
++            int id = g.at(i, j);
++            if (id == EMPTY_ID) {
++                break;
++            }
++            deg++;
++#pragma omp atomic
++            in_deg[id]++;
++        }
++        out_deg[i] = deg;
++        edges_before += deg;
++        max_before = std::max(max_before, deg);
++    }
++    stats.edges_before = edges_before;
++    stats.avg_degree_before = double(edges_before) / n;
++    stats.max_degree_before = max_before;
++
++    // ---- hubs -------------------------------------------------------------
++    std::vector<uint8_t> is_hub;
++    size_t n_hubs = leann_select_hubs(
++            out_deg, in_deg, params.hub_score, params.hub_fraction, is_hub);
++    if (!is_hub[enterpoint]) { // every search starts at the navigating node
++        is_hub[enterpoint] = 1;
++        n_hubs++;
++    }
++    stats.n_hubs = n_hubs;
++
++    if (params.verbose) {
++        printf("NSG::prune_leann: n=%d hubs=%zd M=%d m=%d R=%d "
++               "avg degree before=%.2f\n",
++               n,
++               n_hubs,
++               M_hub,
++               m_low,
++               R,
++               stats.avg_degree_before);
++    }
++
++    // ---- prune the out-edges of every node --------------------------------
++    // A node keeps at most M_hub (hub) or m_low (other) of its out-edges,
++    // the ones that point to hubs first, then the nearest others. Only edges
++    // that already exist are kept (duplicate entries, which a built NSG can
++    // contain, are dropped), so the pass is deterministic and needs no search.
++    std::vector<int> degrees(n, 0);
++    {
++        std::exception_ptr ex;
++        std::atomic<bool> interrupt{false};
++#pragma omp parallel
++        {
++            std::unique_ptr<DistanceComputer> dis;
++            try {
++                dis.reset(storage_distance_computer(storage));
++            } catch (...) {
++                omp_capture_exception(ex, [&] { interrupt = true; });
++            }
++            std::vector<Node> row;
++
++#pragma omp for schedule(dynamic, 256)
++            for (int q = 0; q < n; q++) {
++                if (interrupt.load(std::memory_order_relaxed)) {
++                    continue;
++                }
++                try {
++                    const int budget = is_hub[q] ? M_hub : m_low;
++
++                    row.clear();
++                    for (int j = 0; j < out_deg[q]; j++) {
++                        const int id = g.at(q, j);
++                        bool dup = false;
++                        for (const Node& nd : row) {
++                            if (nd.id == id) {
++                                dup = true;
++                                break;
++                            }
++                        }
++                        if (!dup) {
++                            row.emplace_back(id, 0.0f);
++                        }
++                    }
++
++                    if (static_cast<int>(row.size()) > budget) {
++                        for (Node& nd : row) {
++                            nd.distance = dis->symmetric_dis(q, nd.id);
++                        }
++                        // edges into hubs first, then by distance (ties by id)
++                        std::sort(
++                                row.begin(),
++                                row.end(),
++                                [&](const Node& a, const Node& b) {
++                                    if (is_hub[a.id] != is_hub[b.id]) {
++                                        return is_hub[a.id] > is_hub[b.id];
++                                    }
++                                    return a.distance != b.distance
++                                            ? a.distance < b.distance
++                                            : a.id < b.id;
++                                });
++                        row.resize(budget);
++                    }
++                    if (static_cast<int>(row.size()) != out_deg[q] ||
++                        out_deg[q] > budget) {
++                        for (int j = 0; j < R; j++) {
++                            g.at(q, j) = j < static_cast<int>(row.size())
++                                    ? row[j].id
++                                    : EMPTY_ID;
++                        }
++                    }
++                    degrees[q] = static_cast<int>(row.size());
++                } catch (...) {
++                    omp_capture_exception(ex, [&] { interrupt = true; });
++                }
++            }
++        }
++        omp_rethrow_if_exception(ex);
++    }
++
++    // ---- make the graph fully connected again, as after a normal build ----
++    int num_attached = tree_grow(storage, degrees);
++    check_graph();
++
++    // ---- statistics -------------------------------------------------------
++    std::fill(in_deg.begin(), in_deg.end(), 0);
++    size_t edges_after = 0, hub_edges = 0;
++    int max_after = 0;
++    for (int i = 0; i < n; i++) {
++        int deg = 0;
++        for (int j = 0; j < R; j++) {
++            int id = g.at(i, j);
++            if (id == EMPTY_ID) {
++                break;
++            }
++            deg++;
++            in_deg[id]++;
++        }
++        edges_after += deg;
++        if (is_hub[i]) {
++            hub_edges += deg;
++        }
++        max_after = std::max(max_after, deg);
++    }
++    stats.edges_after = edges_after;
++    stats.avg_degree_after = double(edges_after) / n;
++    stats.max_degree_after = max_after;
++    stats.avg_degree_hubs_after = n_hubs ? double(hub_edges) / n_hubs : 0.0;
++    stats.avg_degree_non_hubs_after = n > static_cast<int>(n_hubs)
++            ? double(edges_after - hub_edges) / (n - n_hubs)
++            : 0.0;
++    for (int i = 0; i < n; i++) {
++        if (in_deg[i] == 0 && i != enterpoint) {
++            stats.n_zero_indegree_after++;
++        }
++    }
++    {
++        // nodes not reachable from the navigating node (tree_grow made this
++        // 0, the count guards against regressions)
++        std::unique_ptr<VisitedTable> vt =
++                VisitedTable::create(ntotal, use_visited_hashset);
++        int reached = dfs(*vt, enterpoint, 0);
++        stats.n_unreachable_after = n - reached;
++    }
++    stats.edge_bytes_before = edges_before * sizeof(int32_t);
++    stats.edge_bytes_after = edges_after * sizeof(int32_t);
++
++    if (params.verbose) {
++        printf("NSG::prune_leann: avg degree %.2f -> %.2f "
++               "(hubs %.2f, others %.2f), max degree %d -> %d, "
++               "%d nodes re-attached by tree_grow, "
++               "%zd nodes without in-edges\n",
++               stats.avg_degree_before,
++               stats.avg_degree_after,
++               stats.avg_degree_hubs_after,
++               stats.avg_degree_non_hubs_after,
++               stats.max_degree_before,
++               stats.max_degree_after,
++               num_attached,
++               stats.n_zero_indegree_after);
++    }
++    return stats;
++}
++
+ } // namespace faiss
+diff --git a/faiss/impl/NSG.h b/faiss/impl/NSG.h
+index a29d93f..3f2aa97 100644
+--- a/faiss/impl/NSG.h
++++ b/faiss/impl/NSG.h
+@@ -16,6 +16,7 @@
+ 
+ #include <faiss/Index.h>
+ #include <faiss/impl/FaissAssert.h>
++#include <faiss/impl/LeannPrune.h>
+ #include <faiss/utils/Heap.h>
+ #include <faiss/utils/random.h>
+ 
+@@ -213,6 +214,33 @@ struct NSG {
+ 
+     // check the integrity of the NSG built
+     void check_graph() const;
++
++    /** LEANN-style high-degree preserving pruning of a built NSG, in place
++     * (adapted from Wang et al. 2025, Algorithm 3, which is described for
++     * HNSW).
++     *
++     * A small fraction of hub nodes (`hub_fraction`, selected by
++     * `hub_score` on the original graph, plus the navigating node) keeps up
++     * to `hub_max_degree` out-edges (default R, i.e. all of them). Every other
++     * node keeps at most `low_max_degree` (default R / 5) of its out-edges:
++     * first the ones that point to hubs, so that each node keeps its access
++     * to the hub backbone, then its nearest others. Only edges that exist
++     * already are kept, no search is needed. Finally the graph is made fully
++     * connected again with tree_grow, as after a normal build.
++     *
++     * Re-selecting the edges of a built NSG under a smaller degree budget
++     * (searching the graph again and re-running the MRNG rule with that
++     * budget) was clearly worse than this in our tests: the small budget
++     * keeps only the nearest MRNG edges and drops the longer ones that NSG
++     * relies on for navigation.
++     *
++     * The adjacency matrix keeps its N-by-R, -1 padded layout; use the
++     * returned statistics (edge_bytes_after) for the size of a compact
++     * encoding. `candidate_pool_size` and `reverse_headroom` are not used.
++     */
++    LeannPruneStats prune_leann(
++            Index* storage,
++            const LeannPruneParams& params = LeannPruneParams());
+ };
+ 
+ } // namespace faiss
+diff --git a/faiss/python/swigfaiss.swig b/faiss/python/swigfaiss.swig
+index 94038b1..0f36f6c 100644
+--- a/faiss/python/swigfaiss.swig
++++ b/faiss/python/swigfaiss.swig
+@@ -122,6 +122,7 @@ typedef uint64_t size_t;
+ #include <faiss/IndexShardsIVF.h>
+ #include <faiss/IndexReplicas.h>
+ #include <faiss/impl/hnsw/MinimaxHeap.h>
++#include <faiss/impl/LeannPrune.h>
+ #include <faiss/impl/HNSW.h>
+ #include <faiss/IndexHNSW.h>
+ 
+@@ -611,6 +612,7 @@ void gpu_sync_all_devices()
+ %include  <faiss/IndexIVFSpectralHash.h>
+ %include  <faiss/IndexIVFAdditiveQuantizer.h>
+ %include  <faiss/impl/hnsw/MinimaxHeap.h>
++%include  <faiss/impl/LeannPrune.h>
+ %include  <faiss/impl/HNSW.h>
+ %ignore faiss::IndexHNSW::locks;
+ %ignore faiss::IndexBinaryHNSW::locks;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index c157676..77461cd 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -25,6 +25,7 @@ set(FAISS_TEST_SRC
+   test_heap.cpp
+   test_pq_code_distance.cpp
+   test_hnsw.cpp
++  test_leann_prune.cpp
+   test_NSG_compressed_graph.cpp
+   test_partitioning.cpp
+   test_fastscan_perf.cpp
+diff --git a/tests/test_leann_prune.cpp b/tests/test_leann_prune.cpp
+new file mode 100644
+index 0000000..0bb539a
+--- /dev/null
++++ b/tests/test_leann_prune.cpp
+@@ -0,0 +1,499 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++// Tests for the LEANN-style high-degree preserving graph pruning
++// (IndexHNSW::prune_leann and IndexNSG::prune_leann).
++
++#include <gtest/gtest.h>
++
++#include <omp.h>
++
++#include <algorithm>
++#include <cmath>
++#include <random>
++#include <set>
++#include <stack>
++#include <vector>
++
++#include <faiss/IndexFlat.h>
++#include <faiss/IndexHNSW.h>
++#include <faiss/IndexNSG.h>
++#include <faiss/clone_index.h>
++#include <faiss/impl/FaissException.h>
++
++using namespace faiss;
++
++namespace {
++
++// Gaussian mixture, so that the data has neighborhood structure
++std::vector<float> make_clustered_data(size_t n, size_t d, int seed) {
++    std::mt19937 rng(seed);
++    std::normal_distribution<float> gauss(0.f, 1.f);
++    const size_t ncenters = 40;
++    std::vector<float> centers(ncenters * d);
++    for (auto& c : centers) {
++        c = 4.f * gauss(rng);
++    }
++    std::vector<float> x(n * d);
++    for (size_t i = 0; i < n; i++) {
++        const float* c = &centers[(rng() % ncenters) * d];
++        for (size_t j = 0; j < d; j++) {
++            x[i * d + j] = c[j] + gauss(rng);
++        }
++    }
++    return x;
++}
++
++std::vector<idx_t> exact_neighbors(
++        const IndexFlat& flat,
++        const float* q,
++        size_t nq,
++        size_t k) {
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    flat.search(nq, q, k, D.data(), I.data());
++    return I;
++}
++
++double recall_at_k(
++        const std::vector<idx_t>& gt,
++        const std::vector<idx_t>& res,
++        size_t nq,
++        size_t k) {
++    size_t hit = 0;
++    for (size_t i = 0; i < nq; i++) {
++        std::set<idx_t> g(gt.begin() + i * k, gt.begin() + (i + 1) * k);
++        for (size_t j = 0; j < k; j++) {
++            hit += g.count(res[i * k + j]);
++        }
++    }
++    return double(hit) / (nq * k);
++}
++
++// checks the structure of one -1 padded adjacency row
++void check_row(
++        const int32_t* row,
++        int slots,
++        int64_t self,
++        int64_t n,
++        int max_degree) {
++    std::set<int32_t> seen;
++    int deg = 0;
++    bool padding = false;
++    for (int j = 0; j < slots; j++) {
++        if (row[j] < 0) {
++            padding = true;
++            continue;
++        }
++        ASSERT_FALSE(padding) << "gap in the adjacency row of node " << self;
++        ASSERT_LT(row[j], n);
++        ASSERT_NE(row[j], self) << "self loop on node " << self;
++        ASSERT_TRUE(seen.insert(row[j]).second)
++                << "duplicate edge " << self << " -> " << row[j];
++        deg++;
++    }
++    ASSERT_LE(deg, max_degree) << "node " << self;
++}
++
++} // namespace
++
++TEST(LeannPruneHNSW, invariants_and_recall) {
++    const size_t d = 32, n = 6000, nq = 200, k = 10;
++    const int M = 16;
++    auto xb = make_clustered_data(n, d, 1);
++    auto xq = make_clustered_data(nq, d, 2);
++
++    IndexHNSWFlat index(d, M);
++    index.hnsw.efConstruction = 100;
++    index.add(n, xb.data());
++
++    IndexFlat flat(d);
++    flat.add(n, xb.data());
++    auto gt = exact_neighbors(flat, xq.data(), nq, k);
++
++    const HNSW& h = index.hnsw;
++    const std::vector<int32_t> neighbors_before(
++            h.neighbors.data(), h.neighbors.data() + h.neighbors.size());
++    const int slots = h.nb_neighbors(0);
++    ASSERT_EQ(slots, 2 * M);
++
++    LeannPruneParams params;
++    params.hub_fraction = 0.02f;
++    params.hub_max_degree = 0; // -> 2 * M
++    params.low_max_degree = 4;
++    LeannPruneStats st = index.prune_leann(params);
++
++    EXPECT_EQ(st.n_nodes, n);
++    EXPECT_GE(st.n_hubs, size_t(std::ceil(0.02 * n)));
++    EXPECT_LE(st.n_hubs, size_t(std::ceil(0.02 * n)) + 1);
++    EXPECT_EQ(st.hub_max_degree, slots);
++    EXPECT_EQ(st.low_max_degree, 4);
++
++    // the pass really removed edges, and kept more on the hubs
++    EXPECT_LT(st.edges_after, st.edges_before);
++    EXPECT_LT(st.avg_degree_after, st.avg_degree_before);
++    EXPECT_GT(st.avg_degree_hubs_after, st.avg_degree_non_hubs_after);
++    EXPECT_EQ(st.edge_bytes_after, st.edges_after * sizeof(int32_t));
++    EXPECT_LE(st.n_unreachable_after, n / 100);
++
++    // structure of every level-0 row, and edge count matches the stats
++    size_t edges = 0;
++    for (size_t i = 0; i < n; i++) {
++        size_t b, e;
++        h.neighbor_range(i, 0, &b, &e);
++        ASSERT_EQ(int(e - b), slots);
++        check_row(&h.neighbors[b], slots, i, n, slots);
++        for (size_t j = b; j < e && h.neighbors[j] >= 0; j++) {
++            edges++;
++        }
++    }
++    EXPECT_EQ(edges, st.edges_after);
++
++    // upper levels are not touched
++    for (size_t i = 0; i < n; i++) {
++        size_t b, e;
++        h.neighbor_range(i, 0, &b, &e);
++        for (size_t j = e; j < h.offsets[i + 1]; j++) {
++            ASSERT_EQ(h.neighbors[j], neighbors_before[j])
++                    << "upper level slot changed for node " << i;
++        }
++    }
++
++    // the pruned graph must still be a usable index
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    index.hnsw.efSearch = 128;
++    index.search(nq, xq.data(), k, D.data(), I.data());
++    EXPECT_GE(recall_at_k(gt, I, nq, k), 0.85);
++}
++
++TEST(LeannPruneHNSW, hubs_keep_more_edges_than_the_others) {
++    const size_t d = 16, n = 3000;
++    auto xb = make_clustered_data(n, d, 3);
++    IndexHNSWFlat index(d, 12);
++    index.add(n, xb.data());
++
++    LeannPruneParams params;
++    params.hub_fraction = 0.05f;
++    params.low_max_degree = 3;
++    LeannPruneStats st = index.prune_leann(params);
++
++    EXPECT_GE(st.n_hubs, size_t(std::ceil(0.05 * n)));
++    // hubs keep a large budget, the others only a small one (plus reverse
++    // edges)
++    EXPECT_GT(st.avg_degree_hubs_after, 1.3 * st.avg_degree_non_hubs_after);
++    EXPECT_LE(st.avg_degree_non_hubs_after, 2.0 * params.low_max_degree + 1);
++}
++
++TEST(LeannPruneHNSW, deterministic_across_thread_counts) {
++    const size_t d = 24, n = 4000;
++    auto xb = make_clustered_data(n, d, 4);
++    IndexHNSWFlat index(d, 12);
++    index.add(n, xb.data());
++
++    std::unique_ptr<Index> copy(clone_index(&index));
++    IndexHNSW* index2 = dynamic_cast<IndexHNSW*>(copy.get());
++    ASSERT_NE(index2, nullptr);
++
++    LeannPruneParams params;
++    params.low_max_degree = 4;
++
++    int nt = omp_get_max_threads();
++    omp_set_num_threads(1);
++    LeannPruneStats s1 = index.prune_leann(params);
++    omp_set_num_threads(std::max(4, nt));
++    LeannPruneStats s2 = index2->prune_leann(params);
++    omp_set_num_threads(nt);
++
++    EXPECT_EQ(s1.edges_after, s2.edges_after);
++    ASSERT_EQ(index.hnsw.neighbors.size(), index2->hnsw.neighbors.size());
++    for (size_t i = 0; i < index.hnsw.neighbors.size(); i++) {
++        ASSERT_EQ(index.hnsw.neighbors[i], index2->hnsw.neighbors[i]) << i;
++    }
++}
++
++TEST(LeannPruneHNSW, inner_product) {
++    const size_t d = 24, n = 3000, nq = 100, k = 5;
++    auto xb = make_clustered_data(n, d, 5);
++    auto xq = make_clustered_data(nq, d, 6);
++    IndexHNSWFlat index(d, 12, METRIC_INNER_PRODUCT);
++    index.add(n, xb.data());
++
++    IndexFlatIP flat(d);
++    flat.add(n, xb.data());
++    auto gt = exact_neighbors(flat, xq.data(), nq, k);
++
++    LeannPruneParams params;
++    params.low_max_degree = 5;
++    LeannPruneStats st = index.prune_leann(params);
++    EXPECT_LT(st.edges_after, st.edges_before);
++
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    index.hnsw.efSearch = 128;
++    index.search(nq, xq.data(), k, D.data(), I.data());
++    EXPECT_GE(recall_at_k(gt, I, nq, k), 0.8);
++}
++
++TEST(LeannPruneHNSW, rejects_bad_parameters) {
++    const size_t d = 8, n = 500;
++    auto xb = make_clustered_data(n, d, 7);
++    IndexHNSWFlat index(d, 8);
++    index.add(n, xb.data());
++
++    LeannPruneParams too_wide;
++    too_wide.hub_max_degree = 2 * 8 + 1; // more than the level-0 slots
++    EXPECT_THROW(index.prune_leann(too_wide), FaissException);
++
++    LeannPruneParams inverted;
++    inverted.hub_max_degree = 8;
++    inverted.low_max_degree = 9;
++    EXPECT_THROW(index.prune_leann(inverted), FaissException);
++
++    LeannPruneParams bad_fraction;
++    bad_fraction.hub_fraction = 1.5f;
++    EXPECT_THROW(index.prune_leann(bad_fraction), FaissException);
++
++    IndexHNSWFlat empty(d, 8);
++    EXPECT_THROW(empty.prune_leann(), FaissException);
++}
++
++TEST(LeannPruneHNSW, all_hubs_is_a_plain_rebuild_of_level_0) {
++    // hub_fraction = 1 => every node has the full budget, i.e. the pass is
++    // just a rebuild of the level-0 links, and must not hurt the recall.
++    const size_t d = 16, n = 2000, nq = 100, k = 10;
++    auto xb = make_clustered_data(n, d, 8);
++    auto xq = make_clustered_data(nq, d, 9);
++    IndexHNSWFlat index(d, 12);
++    index.hnsw.efConstruction = 80;
++    index.add(n, xb.data());
++
++    IndexFlat flat(d);
++    flat.add(n, xb.data());
++    auto gt = exact_neighbors(flat, xq.data(), nq, k);
++
++    LeannPruneParams params;
++    params.hub_fraction = 1.0f;
++    LeannPruneStats st = index.prune_leann(params);
++    EXPECT_EQ(st.n_hubs, n);
++
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    index.hnsw.efSearch = 100;
++    index.search(nq, xq.data(), k, D.data(), I.data());
++    EXPECT_GE(recall_at_k(gt, I, nq, k), 0.9);
++}
++
++TEST(LeannPruneHNSW, quantized_storage) {
++    // the vectors are only available as codes: the pass works on them
++    const size_t d = 32, n = 3000, nq = 100, k = 10;
++    auto xb = make_clustered_data(n, d, 15);
++    auto xq = make_clustered_data(nq, d, 16);
++
++    IndexHNSWSQ index(d, ScalarQuantizer::QT_8bit, 12);
++    index.train(n, xb.data());
++    index.add(n, xb.data());
++
++    IndexFlat flat(d);
++    flat.add(n, xb.data());
++    auto gt = exact_neighbors(flat, xq.data(), nq, k);
++
++    LeannPruneParams params;
++    params.low_max_degree = 5;
++    LeannPruneStats st = index.prune_leann(params);
++    EXPECT_LT(st.edges_after, st.edges_before);
++
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    index.hnsw.efSearch = 128;
++    index.search(nq, xq.data(), k, D.data(), I.data());
++    EXPECT_GE(recall_at_k(gt, I, nq, k), 0.8);
++}
++
++TEST(LeannPruneNSG, invariants_connectivity_and_recall) {
++    const size_t d = 32, n = 4000, nq = 100, k = 10;
++    const int R = 24;
++    auto xb = make_clustered_data(n, d, 10);
++    auto xq = make_clustered_data(nq, d, 11);
++
++    IndexNSGFlat index(d, R);
++    index.build_type = 1; // NNDescent
++    index.add(n, xb.data());
++    ASSERT_TRUE(index.is_built);
++
++    IndexFlat flat(d);
++    flat.add(n, xb.data());
++    auto gt = exact_neighbors(flat, xq.data(), nq, k);
++
++    LeannPruneParams params;
++    params.hub_fraction = 0.05f;
++    params.low_max_degree = 5;
++    LeannPruneStats st = index.prune_leann(params);
++
++    EXPECT_EQ(st.n_nodes, n);
++    EXPECT_EQ(st.hub_max_degree, R);
++    EXPECT_LT(st.edges_after, st.edges_before);
++    EXPECT_GT(st.avg_degree_hubs_after, st.avg_degree_non_hubs_after);
++    EXPECT_EQ(st.n_unreachable_after, 0u);
++    EXPECT_EQ(st.edge_bytes_after, st.edges_after * sizeof(int32_t));
++
++    // adjacency structure
++    const auto& g = *index.nsg.final_graph;
++    ASSERT_EQ(g.K, R);
++    size_t edges = 0;
++    for (size_t i = 0; i < n; i++) {
++        check_row(&g.data[i * R], R, i, n, R);
++        for (int j = 0; j < R && g.data[i * R + j] >= 0; j++) {
++            edges++;
++        }
++    }
++    EXPECT_EQ(edges, st.edges_after);
++
++    // every node is reachable from the navigating node (tree_grow)
++    std::vector<char> seen(n, 0);
++    std::stack<int> todo;
++    todo.push(index.nsg.enterpoint);
++    seen[index.nsg.enterpoint] = 1;
++    size_t reached = 1;
++    while (!todo.empty()) {
++        int u = todo.top();
++        todo.pop();
++        for (int j = 0; j < R && g.data[size_t(u) * R + j] >= 0; j++) {
++            int v = g.data[size_t(u) * R + j];
++            if (!seen[v]) {
++                seen[v] = 1;
++                reached++;
++                todo.push(v);
++            }
++        }
++    }
++    EXPECT_EQ(reached, n);
++
++    std::vector<float> D(nq * k);
++    std::vector<idx_t> I(nq * k);
++    index.nsg.search_L = 100;
++    index.search(nq, xq.data(), k, D.data(), I.data());
++    EXPECT_GE(recall_at_k(gt, I, nq, k), 0.85);
++}
++
++TEST(LeannPruneNSG, keeps_edges_into_hubs_first) {
++    const size_t d = 24, n = 3000;
++    const int R = 24, m = 4;
++    auto xb = make_clustered_data(n, d, 14);
++    IndexNSGFlat index(d, R);
++    index.build_type = 1;
++    index.add(n, xb.data());
++
++    const auto& g = *index.nsg.final_graph;
++    std::vector<int32_t> orig(g.data, g.data + n * R);
++
++    LeannPruneParams params;
++    params.hub_fraction = 0.05f;
++    params.low_max_degree = m;
++    index.prune_leann(params);
++
++    // recompute the hubs the way the pass does
++    std::vector<int> out_deg(n, 0), in_deg(n, 0);
++    for (size_t i = 0; i < n; i++) {
++        for (int j = 0; j < R && orig[i * R + j] >= 0; j++) {
++            out_deg[i]++;
++            in_deg[orig[i * R + j]]++;
++        }
++    }
++    std::vector<uint8_t> is_hub;
++    leann_select_hubs(
++            out_deg, in_deg, params.hub_score, params.hub_fraction, is_hub);
++    is_hub[index.nsg.enterpoint] = 1;
++
++    size_t n_truncated = 0;
++    for (size_t q = 0; q < n; q++) {
++        const int budget = is_hub[q] ? R : m;
++        // a built NSG can hold a few duplicate entries, which the pass drops
++        std::vector<int32_t> uniq;
++        for (int j = 0; j < out_deg[q]; j++) {
++            if (std::find(uniq.begin(), uniq.end(), orig[q * R + j]) ==
++                uniq.end()) {
++                uniq.push_back(orig[q * R + j]);
++            }
++        }
++        const std::set<int32_t> old_row(uniq.begin(), uniq.end());
++        const int kept = std::min<int>(uniq.size(), budget);
++        // the first `kept` edges are edges of the original graph (tree_grow
++        // may only append after them)
++        for (int j = 0; j < kept; j++) {
++            ASSERT_TRUE(old_row.count(g.data[q * R + j]))
++                    << "node " << q << " got a new edge";
++        }
++        if (static_cast<int>(uniq.size()) <= budget) {
++            // nothing to prune: the row is left as it was
++            for (size_t j = 0; j < uniq.size(); j++) {
++                ASSERT_EQ(g.data[q * R + j], uniq[j]);
++            }
++            continue;
++        }
++        n_truncated++;
++        // edges into hubs come first
++        int n_hub_targets = 0;
++        for (int32_t v : old_row) {
++            n_hub_targets += is_hub[v];
++        }
++        for (int j = 0; j < std::min(n_hub_targets, kept); j++) {
++            ASSERT_TRUE(is_hub[g.data[q * R + j]])
++                    << "node " << q << " lost a hub edge for a non-hub one";
++        }
++    }
++    EXPECT_GT(n_truncated, n / 2);
++}
++
++TEST(LeannPruneNSG, deterministic_across_thread_counts) {
++    const size_t d = 16, n = 2000;
++    auto xb = make_clustered_data(n, d, 12);
++    IndexNSGFlat index(d, 16);
++    index.build_type = 1;
++    index.add(n, xb.data());
++
++    std::vector<int32_t> orig(
++            index.nsg.final_graph->data, index.nsg.final_graph->data + n * 16);
++
++    LeannPruneParams params;
++    params.low_max_degree = 3;
++
++    int nt = omp_get_max_threads();
++    omp_set_num_threads(1);
++    index.prune_leann(params);
++    std::vector<int32_t> a(
++            index.nsg.final_graph->data, index.nsg.final_graph->data + n * 16);
++
++    // put the original graph back and prune again with more threads
++    std::copy(orig.begin(), orig.end(), index.nsg.final_graph->data);
++    omp_set_num_threads(std::max(4, nt));
++    index.prune_leann(params);
++    std::vector<int32_t> b(
++            index.nsg.final_graph->data, index.nsg.final_graph->data + n * 16);
++    omp_set_num_threads(nt);
++
++    EXPECT_EQ(a, b);
++}
++
++TEST(LeannPruneNSG, rejects_bad_parameters) {
++    const size_t d = 8, n = 300;
++    auto xb = make_clustered_data(n, d, 13);
++    IndexNSGFlat index(d, 16);
++    index.build_type = 1;
++
++    EXPECT_THROW(index.prune_leann(), FaissException); // not built
++
++    index.add(n, xb.data());
++    LeannPruneParams too_wide;
++    too_wide.hub_max_degree = 17;
++    EXPECT_THROW(index.prune_leann(too_wide), FaissException);
++
++    LeannPruneParams inverted;
++    inverted.hub_max_degree = 8;
++    inverted.low_max_degree = 9;
++    EXPECT_THROW(index.prune_leann(inverted), FaissException);
++}
+diff --git a/tests/test_leann_prune.py b/tests/test_leann_prune.py
+new file mode 100644
+index 0000000..96721b3
+--- /dev/null
++++ b/tests/test_leann_prune.py
+@@ -0,0 +1,120 @@
++# Copyright (c) Meta Platforms, Inc. and affiliates.
++#
++# This source code is licensed under the MIT license found in the
++# LICENSE file in the root directory of this source tree.
++
++"""Python API of the LEANN-style high-degree preserving graph pruning
++(IndexHNSW.prune_leann, IndexNSG.prune_leann). The graph invariants are
++tested in tests/test_leann_prune.cpp."""
++
++import unittest
++
++import numpy as np
++
++import faiss
++
++
++def make_clustered(n, d, seed):
++    rs = np.random.RandomState(seed)
++    centers = 4 * np.random.RandomState(0).randn(40, d)
++    x = centers[rs.randint(0, 40, n)] + rs.randn(n, d)
++    return x.astype("float32")
++
++
++def recall(gt, res):
++    hit = sum(len(set(g) & set(r)) for g, r in zip(gt, res))
++    return hit / gt.size
++
++
++class TestLeannPruneHNSW(unittest.TestCase):
++    def setUp(self):
++        self.d, self.n, self.nq, self.k = 32, 4000, 100, 10
++        self.xb = make_clustered(self.n, self.d, 1)
++        self.xq = make_clustered(self.nq, self.d, 2)
++        flat = faiss.IndexFlatL2(self.d)
++        flat.add(self.xb)
++        _, self.gt = flat.search(self.xq, self.k)
++
++    def test_prune(self):
++        index = faiss.IndexHNSWFlat(self.d, 16)
++        index.hnsw.efConstruction = 100
++        index.add(self.xb)
++
++        params = faiss.LeannPruneParams()
++        params.hub_fraction = 0.02
++        params.low_max_degree = 4
++        stats = index.prune_leann(params)
++
++        self.assertEqual(stats.n_nodes, self.n)
++        self.assertGreaterEqual(stats.n_hubs, int(np.ceil(0.02 * self.n)))
++        self.assertEqual(stats.low_max_degree, 4)
++        self.assertEqual(stats.hub_max_degree, 2 * 16)
++        self.assertLess(stats.edges_after, stats.edges_before)
++        self.assertGreater(
++            stats.avg_degree_hubs_after, stats.avg_degree_non_hubs_after
++        )
++        self.assertEqual(stats.edge_bytes_after, 4 * stats.edges_after)
++
++        index.hnsw.efSearch = 128
++        _, I = index.search(self.xq, self.k)
++        self.assertGreater(recall(self.gt, I), 0.85)
++
++    def test_default_parameters(self):
++        index = faiss.IndexHNSWFlat(self.d, 12)
++        index.add(self.xb)
++        stats = index.prune_leann()
++        self.assertLess(stats.edges_after, stats.edges_before)
++
++    def test_hub_score(self):
++        index = faiss.IndexHNSWFlat(self.d, 12)
++        index.add(self.xb)
++        params = faiss.LeannPruneParams()
++        params.hub_score = faiss.LEANN_HUB_IN_DEGREE
++        stats = index.prune_leann(params)
++        self.assertLess(stats.edges_after, stats.edges_before)
++
++    def test_bad_parameters(self):
++        index = faiss.IndexHNSWFlat(self.d, 8)
++        index.add(self.xb)
++        params = faiss.LeannPruneParams()
++        params.hub_max_degree = 100  # more than the level-0 slots
++        with self.assertRaises(RuntimeError):
++            index.prune_leann(params)
++
++
++class TestLeannPruneNSG(unittest.TestCase):
++    def setUp(self):
++        self.d, self.n, self.nq, self.k = 32, 3000, 100, 10
++        self.xb = make_clustered(self.n, self.d, 3)
++        self.xq = make_clustered(self.nq, self.d, 4)
++        flat = faiss.IndexFlatL2(self.d)
++        flat.add(self.xb)
++        _, self.gt = flat.search(self.xq, self.k)
++
++    def test_prune(self):
++        index = faiss.IndexNSGFlat(self.d, 24)
++        index.build_type = 1
++        index.add(self.xb)
++
++        params = faiss.LeannPruneParams()
++        params.hub_fraction = 0.05
++        params.low_max_degree = 5
++        stats = index.prune_leann(params)
++
++        self.assertEqual(stats.n_nodes, self.n)
++        self.assertEqual(stats.hub_max_degree, 24)
++        self.assertLess(stats.edges_after, stats.edges_before)
++        self.assertEqual(stats.n_unreachable_after, 0)
++
++        index.nsg.search_L = 100
++        _, I = index.search(self.xq, self.k)
++        self.assertGreater(recall(self.gt, I), 0.85)
++
++    def test_not_built(self):
++        index = faiss.IndexNSGFlat(self.d, 16)
++        with self.assertRaises(RuntimeError):
++            index.prune_leann()
++
++
++if __name__ == "__main__":
++    unittest.main()

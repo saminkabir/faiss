@@ -1,0 +1,141 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/coco-nomic-768-normalized_20_variants-shared-index-separate_storage_parallal.csv' — continuing without file logging.
+WARNING: the input knn graph has 76 invalid entries
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/base.fvecs
+  vectors   = 282360
+  dimension = 768
+
+Base dataset loaded
+d      = 768
+nb     = 282360
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 768
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 34 35
+HNSW thread -> CPU 34, NSG thread -> CPU 35
+HNSW build thread actually ran on CPU 34 (pinned to 34)
+NSG  build thread actually ran on CPU 35 (pinned to 35)
+HNSW graph build complete (ntotal = 282360, 1655.56 sec on its own thread)
+NSG  graph build complete (ntotal = 282360, 6220.15 sec on its own thread)
+Combined wall-clock time  = 6220.15 sec (vs. 7875.71 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 1655.56
+[LOG] construction | nsg_build_seconds = 6220.15
+[LOG] construction | parallel_build_wall_seconds = 6220.15
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x55592d7ce770
+nsg.storage  = 0x55592d7ce8d0
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.23741 sec total, 1.18705 ms/query, 842.426 QPS
+[LOG] query | hnsw_search_seconds_total = 0.23741
+[LOG] query | hnsw_ms_per_query = 1.18705
+[LOG] query | hnsw_qps = 842.426
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.296019 sec total, 1.48009 ms/query, 675.633 QPS
+[LOG] query | nsg_search_seconds_total = 0.296019
+[LOG] query | nsg_ms_per_query = 1.48009
+[LOG] query | nsg_qps = 675.633
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.851
+NSG  recall@10 = 0.8165
+[LOG] query | hnsw_recall_at_10 = 0.851
+[LOG] query | nsg_recall_at_10 = 0.8165
+
+HNSW neighbors for query 0:
+  0: id=122368 distance=1.8061
+  1: id=127453 distance=1.80786
+  2: id=144272 distance=1.80928
+  3: id=63328 distance=1.80961
+  4: id=47431 distance=1.81032
+  5: id=104034 distance=1.81047
+  6: id=6210 distance=1.81127
+  7: id=162574 distance=1.81133
+  8: id=29027 distance=1.81135
+  9: id=120711 distance=1.81149
+
+NSG neighbors for query 0:
+  0: id=122368 distance=1.8061
+  1: id=127453 distance=1.80786
+  2: id=144272 distance=1.80928
+  3: id=264841 distance=1.81013
+  4: id=47431 distance=1.81032
+  5: id=104034 distance=1.81047
+  6: id=247031 distance=1.81103
+  7: id=6210 distance=1.81127
+  8: id=162574 distance=1.81133
+  9: id=29027 distance=1.81135
+
+========================================
+Summary
+========================================
+Vectors               = 282360
+Queries                = 200
+Dimension              = 768
+HNSW storage total     = 282360
+NSG  storage total     = 282360
+HNSW build time (own thread) = 1655.56 sec
+NSG  build time (own thread) = 6220.15 sec
+Parallel build wall time     = 6220.15 sec
+HNSW QPS                = 842.426
+NSG  QPS                = 675.633
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 34-35 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/groundtruth.ivecs /home/cc/datasets/codes/logs/coco-nomic-768-normalized_20_variants-shared-index-separate_storage_parallal.csv"
+	User time (seconds): 8473.49
+	System time (seconds): 1737.74
+	Percent of CPU this job got: 163%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:44:14
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2898064
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 9
+	Minor (reclaiming a frame) page faults: 37667733
+	Voluntary context switches: 16970
+	Involuntary context switches: 139981
+	Swaps: 0
+	File system inputs: 1697624
+	File system outputs: 24
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

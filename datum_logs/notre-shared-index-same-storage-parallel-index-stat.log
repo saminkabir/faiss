@@ -1,0 +1,163 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/notre-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/notre/base.fvecs
+  vectors   = 332668
+  dimension = 128
+
+Base dataset loaded
+d      = 128
+nb     = 332668
+Reading /data/kabir/similarity-search/dataset/notre/query.fvecs
+  vectors   = 200
+  dimension = 128
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/notre/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 332668
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 152 153
+HNSW thread -> CPU 152, NSG thread -> CPU 153
+HNSW build thread actually ran on CPU 152 (pinned to 152)
+NSG  build thread actually ran on CPU 153 (pinned to 153)
+HNSW graph build complete (ntotal = 332668, 969.74 sec on its own thread)
+NSG  graph build complete (ntotal = 332668, 4541.25 sec on its own thread)
+Combined wall-clock time  = 4541.25 sec (vs. 5510.99 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 969.74
+[LOG] construction | nsg_build_seconds = 4541.25
+[LOG] construction | parallel_build_wall_seconds = 4541.25
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffee6731d90
+hnsw.storage           = 0x7ffee6731d90
+nsg.storage            = 0x7ffee6731d90
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 170326016 bytes (162.436 MB)
+  HNSW graph overhead    : 90528420 bytes (86.3346 MB)
+  NSG  graph overhead    : 42581504 bytes (40.6089 MB)
+  HNSW graph, compact CSR: 26557664 bytes (25.3274 MB)
+  NSG  graph, compact CSR: 19415480 bytes (18.516 MB)
+  Combined (storage x1)  : 303435940 bytes (289.379 MB)
+  If storage were NOT shared, total would be 451.815 MB (saved 162.436 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 482.965 MB
+[LOG] index_size | storage_bytes = 1.70326e+08
+[LOG] index_size | hnsw_graph_overhead_bytes = 9.05284e+07
+[LOG] index_size | nsg_graph_overhead_bytes = 4.25815e+07
+[LOG] index_size | combined_bytes = 3.03436e+08
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.0537761 sec total, 0.26888 ms/query, 3719.13 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0537761
+[LOG] query | hnsw_ms_per_query = 0.26888
+[LOG] query | hnsw_qps = 3719.13
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.0716806 sec total, 0.358403 ms/query, 2790.16 QPS
+[LOG] query | nsg_search_seconds_total = 0.0716806
+[LOG] query | nsg_ms_per_query = 0.358403
+[LOG] query | nsg_qps = 2790.16
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.9845
+NSG  recall@10 = 0.9885
+[LOG] query | hnsw_recall_at_10 = 0.9845
+[LOG] query | nsg_recall_at_10 = 0.9885
+
+HNSW neighbors for query 0:
+  0: id=142291 distance=28947
+  1: id=288372 distance=47256
+  2: id=35124 distance=51701
+  3: id=252770 distance=56355
+  4: id=169664 distance=56808
+  5: id=319245 distance=59887
+  6: id=282121 distance=63320
+  7: id=63778 distance=65450
+  8: id=86339 distance=66059
+  9: id=277355 distance=66878
+
+NSG neighbors for query 0:
+  0: id=142291 distance=28947
+  1: id=288372 distance=47256
+  2: id=35124 distance=51701
+  3: id=252770 distance=56355
+  4: id=169664 distance=56808
+  5: id=319245 distance=59887
+  6: id=282121 distance=63320
+  7: id=63778 distance=65450
+  8: id=86339 distance=66059
+  9: id=277355 distance=66878
+
+========================================
+Summary
+========================================
+Vectors               = 332668
+Queries                = 200
+Dimension              = 128
+Shared storage total   = 332668
+HNSW build time (own thread) = 969.74 sec
+NSG  build time (own thread) = 4541.25 sec
+Parallel build wall time     = 4541.25 sec
+HNSW QPS                = 3719.13
+NSG  QPS                = 2790.16
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 152-153 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/notre/base.fvecs /data/kabir/similarity-search/dataset/notre/query.fvecs /data/kabir/similarity-search/dataset/notre/groundtruth.ivecs /home/cc/datasets/codes/logs/notre-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 6119.54
+	System time (seconds): 2151.58
+	Percent of CPU this job got: 182%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:15:41
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 912864
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 5499014
+	Voluntary context switches: 21026
+	Involuntary context switches: 92015
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 24
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

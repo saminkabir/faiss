@@ -1,0 +1,140 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/MNIST-shared-index-separate_storage_parallal.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/MNIST/base.fvecs
+  vectors   = 69000
+  dimension = 784
+
+Base dataset loaded
+d      = 784
+nb     = 69000
+Reading /data/kabir/similarity-search/dataset/MNIST/query.fvecs
+  vectors   = 200
+  dimension = 784
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/MNIST/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 20 21
+HNSW thread -> CPU 20, NSG thread -> CPU 21
+HNSW build thread actually ran on CPU 20 (pinned to 20)
+NSG  build thread actually ran on CPU 21 (pinned to 21)
+HNSW graph build complete (ntotal = 69000, 267.483 sec on its own thread)
+NSG  graph build complete (ntotal = 69000, 692.129 sec on its own thread)
+Combined wall-clock time  = 692.129 sec (vs. 959.612 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 267.483
+[LOG] construction | nsg_build_seconds = 692.129
+[LOG] construction | parallel_build_wall_seconds = 692.129
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x5652fe2dd750
+nsg.storage  = 0x5652fe2dd8b0
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.298259 sec total, 1.4913 ms/query, 670.557 QPS
+[LOG] query | hnsw_search_seconds_total = 0.298259
+[LOG] query | hnsw_ms_per_query = 1.4913
+[LOG] query | hnsw_qps = 670.557
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.304075 sec total, 1.52038 ms/query, 657.731 QPS
+[LOG] query | nsg_search_seconds_total = 0.304075
+[LOG] query | nsg_ms_per_query = 1.52038
+[LOG] query | nsg_qps = 657.731
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.9955
+NSG  recall@10 = 0.9965
+[LOG] query | hnsw_recall_at_10 = 0.9955
+[LOG] query | nsg_recall_at_10 = 0.9965
+
+HNSW neighbors for query 0:
+  0: id=13736 distance=46.0435
+  1: id=11126 distance=46.3412
+  2: id=37085 distance=46.4162
+  3: id=7519 distance=47.7739
+  4: id=36191 distance=52.7526
+  5: id=57925 distance=53.4248
+  6: id=8937 distance=53.865
+  7: id=2953 distance=53.8752
+  8: id=42948 distance=53.9147
+  9: id=65553 distance=54.2194
+
+NSG neighbors for query 0:
+  0: id=13736 distance=46.0435
+  1: id=11126 distance=46.3412
+  2: id=37085 distance=46.4162
+  3: id=7519 distance=47.7739
+  4: id=36191 distance=52.7526
+  5: id=57925 distance=53.4248
+  6: id=8937 distance=53.865
+  7: id=2953 distance=53.8752
+  8: id=42948 distance=53.9147
+  9: id=65553 distance=54.2194
+
+========================================
+Summary
+========================================
+Vectors               = 69000
+Queries                = 200
+Dimension              = 784
+HNSW storage total     = 69000
+NSG  storage total     = 69000
+HNSW build time (own thread) = 267.483 sec
+NSG  build time (own thread) = 692.129 sec
+Parallel build wall time     = 692.129 sec
+HNSW QPS                = 670.557
+NSG  QPS                = 657.731
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 20-21 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/MNIST/base.fvecs /data/kabir/similarity-search/dataset/MNIST/query.fvecs /data/kabir/similarity-search/dataset/MNIST/groundtruth.ivecs /home/cc/datasets/codes/logs/MNIST-shared-index-separate_storage_parallal.csv"
+	User time (seconds): 917.41
+	System time (seconds): 68.10
+	Percent of CPU this job got: 130%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:37.73
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 739224
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 14
+	Minor (reclaiming a frame) page faults: 2081587
+	Voluntary context switches: 4737
+	Involuntary context switches: 23454
+	Swaps: 0
+	File system inputs: 28128
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

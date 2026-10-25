@@ -1,0 +1,163 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/yi-128-ip_20_variants-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/base.fvecs
+  vectors   = 187843
+  dimension = 128
+
+Base dataset loaded
+d      = 128
+nb     = 187843
+Reading /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 128
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 187843
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 168 169
+HNSW thread -> CPU 168, NSG thread -> CPU 169
+HNSW build thread actually ran on CPU 168 (pinned to 168)
+NSG  build thread actually ran on CPU 169 (pinned to 169)
+HNSW graph build complete (ntotal = 187843, 248.697 sec on its own thread)
+NSG  graph build complete (ntotal = 187843, 1280.05 sec on its own thread)
+Combined wall-clock time  = 1280.05 sec (vs. 1528.74 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 248.697
+[LOG] construction | nsg_build_seconds = 1280.05
+[LOG] construction | parallel_build_wall_seconds = 1280.05
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffe1782bb60
+hnsw.storage           = 0x7ffe1782bb60
+nsg.storage            = 0x7ffe1782bb60
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 96175616 bytes (91.7202 MB)
+  HNSW graph overhead    : 51118200 bytes (48.7501 MB)
+  NSG  graph overhead    : 24043904 bytes (22.9301 MB)
+  HNSW graph, compact CSR: 14590432 bytes (13.9145 MB)
+  NSG  graph, compact CSR: 10967192 bytes (10.4591 MB)
+  Combined (storage x1)  : 171337720 bytes (163.4 MB)
+  If storage were NOT shared, total would be 255.121 MB (saved 91.7202 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 278.871 MB
+[LOG] index_size | storage_bytes = 9.61756e+07
+[LOG] index_size | hnsw_graph_overhead_bytes = 5.11182e+07
+[LOG] index_size | nsg_graph_overhead_bytes = 2.40439e+07
+[LOG] index_size | combined_bytes = 1.71338e+08
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.0403902 sec total, 0.201951 ms/query, 4951.7 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0403902
+[LOG] query | hnsw_ms_per_query = 0.201951
+[LOG] query | hnsw_qps = 4951.7
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.0519492 sec total, 0.259746 ms/query, 3849.92 QPS
+[LOG] query | nsg_search_seconds_total = 0.0519492
+[LOG] query | nsg_ms_per_query = 0.259746
+[LOG] query | nsg_qps = 3849.92
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.8625
+NSG  recall@10 = 0.72
+[LOG] query | hnsw_recall_at_10 = 0.8625
+[LOG] query | nsg_recall_at_10 = 0.72
+
+HNSW neighbors for query 0:
+  0: id=86751 distance=573.353
+  1: id=9634 distance=586.288
+  2: id=42423 distance=591.712
+  3: id=3710 distance=596.096
+  4: id=50203 distance=598.777
+  5: id=123682 distance=599.746
+  6: id=27412 distance=600.691
+  7: id=32437 distance=601.625
+  8: id=163871 distance=602.093
+  9: id=132597 distance=602.684
+
+NSG neighbors for query 0:
+  0: id=86751 distance=573.353
+  1: id=9634 distance=586.288
+  2: id=42423 distance=591.712
+  3: id=3710 distance=596.096
+  4: id=50203 distance=598.777
+  5: id=123682 distance=599.746
+  6: id=27412 distance=600.691
+  7: id=32437 distance=601.625
+  8: id=132597 distance=602.684
+  9: id=177924 distance=603.781
+
+========================================
+Summary
+========================================
+Vectors               = 187843
+Queries                = 200
+Dimension              = 128
+Shared storage total   = 187843
+HNSW build time (own thread) = 248.697 sec
+NSG  build time (own thread) = 1280.05 sec
+Parallel build wall time     = 1280.05 sec
+HNSW QPS                = 4951.7
+NSG  QPS                = 3849.92
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 168-169 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/base.fvecs /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/query.fvecs /data/kabir/similarity-search/dataset/yi-128-ip_20_variants/groundtruth.ivecs /home/cc/datasets/codes/logs/yi-128-ip_20_variants-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 1662.15
+	System time (seconds): 511.07
+	Percent of CPU this job got: 169%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 21:20.36
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 521672
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1421327
+	Voluntary context switches: 1749
+	Involuntary context switches: 26628
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 24
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

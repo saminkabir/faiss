@@ -1,0 +1,164 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/gooaq-distilroberta-768-normalized_20_variants-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+WARNING: the input knn graph has 1 invalid entries
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/base.fvecs
+  vectors   = 1000000
+  dimension = 768
+
+Base dataset loaded
+d      = 768
+nb     = 1000000
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 768
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 1000000
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 144 145
+HNSW thread -> CPU 144, NSG thread -> CPU 145
+HNSW build thread actually ran on CPU 144 (pinned to 144)
+NSG  build thread actually ran on CPU 145 (pinned to 145)
+HNSW graph build complete (ntotal = 1000000, 14145.6 sec on its own thread)
+NSG  graph build complete (ntotal = 1000000, 52333.2 sec on its own thread)
+Combined wall-clock time  = 52333.2 sec (vs. 66478.8 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 14145.6
+[LOG] construction | nsg_build_seconds = 52333.2
+[LOG] construction | parallel_build_wall_seconds = 52333.2
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7fff89dfd100
+hnsw.storage           = 0x7fff89dfd100
+nsg.storage            = 0x7fff89dfd100
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 3072000000 bytes (2929.69 MB)
+  HNSW graph overhead    : 272129364 bytes (259.523 MB)
+  NSG  graph overhead    : 128000000 bytes (122.07 MB)
+  HNSW graph, compact CSR: 110685192 bytes (105.558 MB)
+  NSG  graph, compact CSR: 80603716 bytes (76.8697 MB)
+  Combined (storage x1)  : 3472129364 bytes (3311.28 MB)
+  If storage were NOT shared, total would be 6240.97 MB (saved 2929.69 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 6267.02 MB
+[LOG] index_size | storage_bytes = 3.072e+09
+[LOG] index_size | hnsw_graph_overhead_bytes = 2.72129e+08
+[LOG] index_size | nsg_graph_overhead_bytes = 1.28e+08
+[LOG] index_size | combined_bytes = 3.47213e+09
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.2624 sec total, 1.312 ms/query, 762.195 QPS
+[LOG] query | hnsw_search_seconds_total = 0.2624
+[LOG] query | hnsw_ms_per_query = 1.312
+[LOG] query | hnsw_qps = 762.195
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.319202 sec total, 1.59601 ms/query, 626.562 QPS
+[LOG] query | nsg_search_seconds_total = 0.319202
+[LOG] query | nsg_ms_per_query = 1.59601
+[LOG] query | nsg_qps = 626.562
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.9875
+NSG  recall@10 = 0.991
+[LOG] query | hnsw_recall_at_10 = 0.9875
+[LOG] query | nsg_recall_at_10 = 0.991
+
+HNSW neighbors for query 0:
+  0: id=196996 distance=0.38066
+  1: id=701564 distance=0.398566
+  2: id=274364 distance=0.428514
+  3: id=144144 distance=0.435135
+  4: id=345489 distance=0.469991
+  5: id=912267 distance=0.471159
+  6: id=738547 distance=0.531916
+  7: id=495333 distance=0.53308
+  8: id=909154 distance=0.540374
+  9: id=700120 distance=0.548897
+
+NSG neighbors for query 0:
+  0: id=196996 distance=0.38066
+  1: id=701564 distance=0.398566
+  2: id=274364 distance=0.428514
+  3: id=144144 distance=0.435135
+  4: id=345489 distance=0.469991
+  5: id=912267 distance=0.471159
+  6: id=738547 distance=0.531916
+  7: id=495333 distance=0.53308
+  8: id=909154 distance=0.540374
+  9: id=700120 distance=0.548897
+
+========================================
+Summary
+========================================
+Vectors               = 1000000
+Queries                = 200
+Dimension              = 768
+Shared storage total   = 1000000
+HNSW build time (own thread) = 14145.6 sec
+NSG  build time (own thread) = 52333.2 sec
+Parallel build wall time     = 52333.2 sec
+HNSW QPS                = 762.195
+NSG  QPS                = 626.562
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 144-145 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/groundtruth.ivecs /home/cc/datasets/codes/logs/gooaq-distilroberta-768-normalized_20_variants-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 75799.79
+	System time (seconds): 21450.04
+	Percent of CPU this job got: 185%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 14:32:19
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 7673448
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 8
+	Minor (reclaiming a frame) page faults: 506727665
+	Voluntary context switches: 31441
+	Involuntary context switches: 1227277
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

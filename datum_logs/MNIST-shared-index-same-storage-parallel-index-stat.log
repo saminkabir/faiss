@@ -1,0 +1,163 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/MNIST-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/MNIST/base.fvecs
+  vectors   = 69000
+  dimension = 784
+
+Base dataset loaded
+d      = 784
+nb     = 69000
+Reading /data/kabir/similarity-search/dataset/MNIST/query.fvecs
+  vectors   = 200
+  dimension = 784
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/MNIST/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 69000
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 150 151
+HNSW thread -> CPU 150, NSG thread -> CPU 151
+HNSW build thread actually ran on CPU 150 (pinned to 150)
+NSG  build thread actually ran on CPU 151 (pinned to 151)
+HNSW graph build complete (ntotal = 69000, 419.958 sec on its own thread)
+NSG  graph build complete (ntotal = 69000, 864.239 sec on its own thread)
+Combined wall-clock time  = 864.239 sec (vs. 1284.2 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 419.958
+[LOG] construction | nsg_build_seconds = 864.239
+[LOG] construction | parallel_build_wall_seconds = 864.239
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffca5219df0
+hnsw.storage           = 0x7ffca5219df0
+nsg.storage            = 0x7ffca5219df0
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 216384000 bytes (206.36 MB)
+  HNSW graph overhead    : 18777780 bytes (17.9079 MB)
+  NSG  graph overhead    : 8832000 bytes (8.42285 MB)
+  HNSW graph, compact CSR: 5891612 bytes (5.61868 MB)
+  NSG  graph, compact CSR: 4340364 bytes (4.13929 MB)
+  Combined (storage x1)  : 243993780 bytes (232.691 MB)
+  If storage were NOT shared, total would be 439.05 MB (saved 206.36 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 473.766 MB
+[LOG] index_size | storage_bytes = 2.16384e+08
+[LOG] index_size | hnsw_graph_overhead_bytes = 1.87778e+07
+[LOG] index_size | nsg_graph_overhead_bytes = 8.832e+06
+[LOG] index_size | combined_bytes = 2.43994e+08
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.260059 sec total, 1.30029 ms/query, 769.057 QPS
+[LOG] query | hnsw_search_seconds_total = 0.260059
+[LOG] query | hnsw_ms_per_query = 1.30029
+[LOG] query | hnsw_qps = 769.057
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.296886 sec total, 1.48443 ms/query, 673.66 QPS
+[LOG] query | nsg_search_seconds_total = 0.296886
+[LOG] query | nsg_ms_per_query = 1.48443
+[LOG] query | nsg_qps = 673.66
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.9955
+NSG  recall@10 = 0.9965
+[LOG] query | hnsw_recall_at_10 = 0.9955
+[LOG] query | nsg_recall_at_10 = 0.9965
+
+HNSW neighbors for query 0:
+  0: id=13736 distance=46.0435
+  1: id=11126 distance=46.3412
+  2: id=37085 distance=46.4162
+  3: id=7519 distance=47.7739
+  4: id=36191 distance=52.7526
+  5: id=57925 distance=53.4248
+  6: id=8937 distance=53.865
+  7: id=2953 distance=53.8752
+  8: id=42948 distance=53.9147
+  9: id=65553 distance=54.2194
+
+NSG neighbors for query 0:
+  0: id=13736 distance=46.0435
+  1: id=11126 distance=46.3412
+  2: id=37085 distance=46.4162
+  3: id=7519 distance=47.7739
+  4: id=36191 distance=52.7526
+  5: id=57925 distance=53.4248
+  6: id=8937 distance=53.865
+  7: id=2953 distance=53.8752
+  8: id=42948 distance=53.9147
+  9: id=65553 distance=54.2194
+
+========================================
+Summary
+========================================
+Vectors               = 69000
+Queries                = 200
+Dimension              = 784
+Shared storage total   = 69000
+HNSW build time (own thread) = 419.958 sec
+NSG  build time (own thread) = 864.239 sec
+Parallel build wall time     = 864.239 sec
+HNSW QPS                = 769.057
+NSG  QPS                = 673.66
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 150-151 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/MNIST/base.fvecs /data/kabir/similarity-search/dataset/MNIST/query.fvecs /data/kabir/similarity-search/dataset/MNIST/groundtruth.ivecs /home/cc/datasets/codes/logs/MNIST-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 1201.57
+	System time (seconds): 84.14
+	Percent of CPU this job got: 148%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 14:25.32
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 553744
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 3
+	Minor (reclaiming a frame) page faults: 1758646
+	Voluntary context switches: 1409
+	Involuntary context switches: 27696
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 24
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

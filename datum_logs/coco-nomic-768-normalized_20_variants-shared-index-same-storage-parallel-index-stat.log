@@ -1,0 +1,164 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/coco-nomic-768-normalized_20_variants-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+WARNING: the input knn graph has 76 invalid entries
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/base.fvecs
+  vectors   = 282360
+  dimension = 768
+
+Base dataset loaded
+d      = 768
+nb     = 282360
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 768
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 282360
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 164 165
+HNSW thread -> CPU 164, NSG thread -> CPU 165
+HNSW build thread actually ran on CPU 164 (pinned to 164)
+NSG  build thread actually ran on CPU 165 (pinned to 165)
+HNSW graph build complete (ntotal = 282360, 1357.97 sec on its own thread)
+NSG  graph build complete (ntotal = 282360, 6703.69 sec on its own thread)
+Combined wall-clock time  = 6703.69 sec (vs. 8061.67 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 1357.97
+[LOG] construction | nsg_build_seconds = 6703.69
+[LOG] construction | parallel_build_wall_seconds = 6703.69
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7fff343c4010
+hnsw.storage           = 0x7fff343c4010
+nsg.storage            = 0x7fff343c4010
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 867409920 bytes (827.227 MB)
+  HNSW graph overhead    : 76844916 bytes (73.285 MB)
+  NSG  graph overhead    : 36142080 bytes (34.4678 MB)
+  HNSW graph, compact CSR: 20533788 bytes (19.5825 MB)
+  NSG  graph, compact CSR: 14562712 bytes (13.8881 MB)
+  Combined (storage x1)  : 980396916 bytes (934.979 MB)
+  If storage were NOT shared, total would be 1762.21 MB (saved 827.227 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 1794.43 MB
+[LOG] index_size | storage_bytes = 8.6741e+08
+[LOG] index_size | hnsw_graph_overhead_bytes = 7.68449e+07
+[LOG] index_size | nsg_graph_overhead_bytes = 3.61421e+07
+[LOG] index_size | combined_bytes = 9.80397e+08
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.298382 sec total, 1.49191 ms/query, 670.283 QPS
+[LOG] query | hnsw_search_seconds_total = 0.298382
+[LOG] query | hnsw_ms_per_query = 1.49191
+[LOG] query | hnsw_qps = 670.283
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.296188 sec total, 1.48094 ms/query, 675.247 QPS
+[LOG] query | nsg_search_seconds_total = 0.296188
+[LOG] query | nsg_ms_per_query = 1.48094
+[LOG] query | nsg_qps = 675.247
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.851
+NSG  recall@10 = 0.8165
+[LOG] query | hnsw_recall_at_10 = 0.851
+[LOG] query | nsg_recall_at_10 = 0.8165
+
+HNSW neighbors for query 0:
+  0: id=122368 distance=1.8061
+  1: id=127453 distance=1.80786
+  2: id=144272 distance=1.80928
+  3: id=63328 distance=1.80961
+  4: id=47431 distance=1.81032
+  5: id=104034 distance=1.81047
+  6: id=6210 distance=1.81127
+  7: id=162574 distance=1.81133
+  8: id=29027 distance=1.81135
+  9: id=120711 distance=1.81149
+
+NSG neighbors for query 0:
+  0: id=122368 distance=1.8061
+  1: id=127453 distance=1.80786
+  2: id=144272 distance=1.80928
+  3: id=264841 distance=1.81013
+  4: id=47431 distance=1.81032
+  5: id=104034 distance=1.81047
+  6: id=247031 distance=1.81103
+  7: id=6210 distance=1.81127
+  8: id=162574 distance=1.81133
+  9: id=29027 distance=1.81135
+
+========================================
+Summary
+========================================
+Vectors               = 282360
+Queries                = 200
+Dimension              = 768
+Shared storage total   = 282360
+HNSW build time (own thread) = 1357.97 sec
+NSG  build time (own thread) = 6703.69 sec
+Parallel build wall time     = 6703.69 sec
+HNSW QPS                = 670.283
+NSG  QPS                = 675.247
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 164-165 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/coco-nomic-768-normalized_20_variants/groundtruth.ivecs /home/cc/datasets/codes/logs/coco-nomic-768-normalized_20_variants-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 9221.96
+	System time (seconds): 1803.37
+	Percent of CPU this job got: 164%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:51:45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2192456
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 9
+	Minor (reclaiming a frame) page faults: 32145507
+	Voluntary context switches: 20345
+	Involuntary context switches: 115409
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

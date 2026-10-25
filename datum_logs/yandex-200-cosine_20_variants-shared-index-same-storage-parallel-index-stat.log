@@ -1,0 +1,164 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/yandex-200-cosine_20_variants-shared-index-same-storage-parallel-index-stat.csv' — continuing without file logging.
+WARNING: the input knn graph has 3 invalid entries
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/base.fvecs
+  vectors   = 1000000
+  dimension = 200
+
+Base dataset loaded
+d      = 200
+nb     = 1000000
+Reading /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 200
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 1000000
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 166 167
+HNSW thread -> CPU 166, NSG thread -> CPU 167
+HNSW build thread actually ran on CPU 166 (pinned to 166)
+NSG  build thread actually ran on CPU 167 (pinned to 167)
+HNSW graph build complete (ntotal = 1000000, 2961.5 sec on its own thread)
+NSG  graph build complete (ntotal = 1000000, 26298.7 sec on its own thread)
+Combined wall-clock time  = 26298.7 sec (vs. 29260.2 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 2961.5
+[LOG] construction | nsg_build_seconds = 26298.7
+[LOG] construction | parallel_build_wall_seconds = 26298.7
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffd274f3630
+hnsw.storage           = 0x7ffd274f3630
+nsg.storage            = 0x7ffd274f3630
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 800000000 bytes (762.939 MB)
+  HNSW graph overhead    : 272129364 bytes (259.523 MB)
+  NSG  graph overhead    : 128000000 bytes (122.07 MB)
+  HNSW graph, compact CSR: 106450064 bytes (101.519 MB)
+  NSG  graph, compact CSR: 79933704 bytes (76.2307 MB)
+  Combined (storage x1)  : 1200129364 bytes (1144.53 MB)
+  If storage were NOT shared, total would be 1907.47 MB (saved 762.939 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 1930.76 MB
+[LOG] index_size | storage_bytes = 8e+08
+[LOG] index_size | hnsw_graph_overhead_bytes = 2.72129e+08
+[LOG] index_size | nsg_graph_overhead_bytes = 1.28e+08
+[LOG] index_size | combined_bytes = 1.20013e+09
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.0895152 sec total, 0.447576 ms/query, 2234.26 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0895152
+[LOG] query | hnsw_ms_per_query = 0.447576
+[LOG] query | hnsw_qps = 2234.26
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.12692 sec total, 0.6346 ms/query, 1575.79 QPS
+[LOG] query | nsg_search_seconds_total = 0.12692
+[LOG] query | nsg_ms_per_query = 0.6346
+[LOG] query | nsg_qps = 1575.79
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.7805
+NSG  recall@10 = 0.8365
+[LOG] query | hnsw_recall_at_10 = 0.7805
+[LOG] query | nsg_recall_at_10 = 0.8365
+
+HNSW neighbors for query 0:
+  0: id=324162 distance=0.806198
+  1: id=61901 distance=0.820942
+  2: id=919410 distance=0.823726
+  3: id=793881 distance=0.864781
+  4: id=366625 distance=0.929646
+  5: id=303618 distance=0.932067
+  6: id=968357 distance=0.940769
+  7: id=19289 distance=0.95765
+  8: id=666933 distance=0.966786
+  9: id=410359 distance=0.974088
+
+NSG neighbors for query 0:
+  0: id=324162 distance=0.806198
+  1: id=61901 distance=0.820942
+  2: id=919410 distance=0.823726
+  3: id=793881 distance=0.864781
+  4: id=366625 distance=0.929646
+  5: id=303618 distance=0.932067
+  6: id=968357 distance=0.940769
+  7: id=19289 distance=0.95765
+  8: id=666933 distance=0.966786
+  9: id=410359 distance=0.974088
+
+========================================
+Summary
+========================================
+Vectors               = 1000000
+Queries                = 200
+Dimension              = 200
+Shared storage total   = 1000000
+HNSW build time (own thread) = 2961.5 sec
+NSG  build time (own thread) = 26298.7 sec
+Parallel build wall time     = 26298.7 sec
+HNSW QPS                = 2234.26
+NSG  QPS                = 1575.79
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 166-167 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/base.fvecs /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/query.fvecs /data/kabir/similarity-search/dataset/yandex-200-cosine_20_variants/groundtruth.ivecs /home/cc/datasets/codes/logs/yandex-200-cosine_20_variants-shared-index-same-storage-parallel-index-stat.csv"
+	User time (seconds): 35153.90
+	System time (seconds): 13525.47
+	Percent of CPU this job got: 185%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 7:18:20
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3232596
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 3
+	Minor (reclaiming a frame) page faults: 96131739
+	Voluntary context switches: 12171
+	Involuntary context switches: 310926
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

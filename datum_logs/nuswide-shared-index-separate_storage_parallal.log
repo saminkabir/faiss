@@ -1,0 +1,140 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/nuswide-shared-index-separate_storage_parallal.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/nuswide/base.fvecs
+  vectors   = 268643
+  dimension = 500
+
+Base dataset loaded
+d      = 500
+nb     = 268643
+Reading /data/kabir/similarity-search/dataset/nuswide/query.fvecs
+  vectors   = 200
+  dimension = 500
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/nuswide/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 24 25
+HNSW thread -> CPU 24, NSG thread -> CPU 25
+HNSW build thread actually ran on CPU 24 (pinned to 24)
+NSG  build thread actually ran on CPU 25 (pinned to 25)
+HNSW graph build complete (ntotal = 268643, 1245.9 sec on its own thread)
+NSG  graph build complete (ntotal = 268643, 3925.8 sec on its own thread)
+Combined wall-clock time  = 3925.8 sec (vs. 5171.7 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 1245.9
+[LOG] construction | nsg_build_seconds = 3925.8
+[LOG] construction | parallel_build_wall_seconds = 3925.8
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x560009c06750
+nsg.storage  = 0x560009c068b0
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.33458 sec total, 1.6729 ms/query, 597.765 QPS
+[LOG] query | hnsw_search_seconds_total = 0.33458
+[LOG] query | hnsw_ms_per_query = 1.6729
+[LOG] query | hnsw_qps = 597.765
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.294968 sec total, 1.47484 ms/query, 678.04 QPS
+[LOG] query | nsg_search_seconds_total = 0.294968
+[LOG] query | nsg_ms_per_query = 1.47484
+[LOG] query | nsg_qps = 678.04
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.5495
+NSG  recall@10 = 0.542
+[LOG] query | hnsw_recall_at_10 = 0.5495
+[LOG] query | nsg_recall_at_10 = 0.542
+
+HNSW neighbors for query 0:
+  0: id=259527 distance=827
+  1: id=230073 distance=831
+  2: id=125726 distance=832
+  3: id=231582 distance=837
+  4: id=42656 distance=838
+  5: id=108753 distance=843
+  6: id=210414 distance=849
+  7: id=228414 distance=862
+  8: id=31308 distance=864
+  9: id=219523 distance=864
+
+NSG neighbors for query 0:
+  0: id=230073 distance=831
+  1: id=42656 distance=838
+  2: id=108753 distance=843
+  3: id=182472 distance=850
+  4: id=168848 distance=876
+  5: id=64543 distance=877
+  6: id=191260 distance=879
+  7: id=18007 distance=881
+  8: id=253340 distance=883
+  9: id=10243 distance=885
+
+========================================
+Summary
+========================================
+Vectors               = 268643
+Queries                = 200
+Dimension              = 500
+HNSW storage total     = 268643
+NSG  storage total     = 268643
+HNSW build time (own thread) = 1245.9 sec
+NSG  build time (own thread) = 3925.8 sec
+Parallel build wall time     = 3925.8 sec
+HNSW QPS                = 597.765
+NSG  QPS                = 678.04
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 24-25 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/nuswide/base.fvecs /data/kabir/similarity-search/dataset/nuswide/query.fvecs /data/kabir/similarity-search/dataset/nuswide/groundtruth.ivecs /home/cc/datasets/codes/logs/nuswide-shared-index-separate_storage_parallal.csv"
+	User time (seconds): 5646.94
+	System time (seconds): 1414.79
+	Percent of CPU this job got: 179%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:05:27
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1913020
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 11
+	Minor (reclaiming a frame) page faults: 14722870
+	Voluntary context switches: 15772
+	Involuntary context switches: 111572
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

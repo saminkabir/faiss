@@ -1,0 +1,140 @@
+Warning: could not open log file '/home/cc/datasets/codes/logs/audio-shared-index-separate_storage_parallal.csv' — continuing without file logging.
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 32
+HNSW efConstruction = 100
+HNSW efSearch       = 64
+NSG R                = 32
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/audio/base.fvecs
+  vectors   = 53387
+  dimension = 192
+
+Base dataset loaded
+d      = 192
+nb     = 53387
+Reading /data/kabir/similarity-search/dataset/audio/query.fvecs
+  vectors   = 200
+  dimension = 192
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/audio/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 0 1
+HNSW thread -> CPU 0, NSG thread -> CPU 1
+HNSW build thread actually ran on CPU 0 (pinned to 0)
+NSG  build thread actually ran on CPU 1 (pinned to 1)
+HNSW graph build complete (ntotal = 53387, 77.9151 sec on its own thread)
+NSG  graph build complete (ntotal = 53387, 209.778 sec on its own thread)
+Combined wall-clock time  = 209.782 sec (vs. 287.693 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 77.9151
+[LOG] construction | nsg_build_seconds = 209.778
+[LOG] construction | parallel_build_wall_seconds = 209.782
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x55ab1f784750
+nsg.storage  = 0x55ab1f7848b0
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 10
+
+Running HNSW batch search (efSearch = 64)...
+HNSW search time  = 0.0626882 sec total, 0.313441 ms/query, 3190.39 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0626882
+[LOG] query | hnsw_ms_per_query = 0.313441
+[LOG] query | hnsw_qps = 3190.39
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.075256 sec total, 0.37628 ms/query, 2657.59 QPS
+[LOG] query | nsg_search_seconds_total = 0.075256
+[LOG] query | nsg_ms_per_query = 0.37628
+[LOG] query | nsg_qps = 2657.59
+
+----------------------------------------
+Recall@10
+----------------------------------------
+HNSW recall@10 = 0.9865
+NSG  recall@10 = 0.9895
+[LOG] query | hnsw_recall_at_10 = 0.9865
+[LOG] query | nsg_recall_at_10 = 0.9895
+
+HNSW neighbors for query 0:
+  0: id=12675 distance=1.71299e+09
+  1: id=28232 distance=1.98464e+09
+  2: id=37727 distance=2.03561e+09
+  3: id=8795 distance=2.09848e+09
+  4: id=27572 distance=2.10935e+09
+  5: id=16050 distance=2.12986e+09
+  6: id=28477 distance=2.17701e+09
+  7: id=12109 distance=2.18885e+09
+  8: id=47852 distance=2.19946e+09
+  9: id=12343 distance=2.20983e+09
+
+NSG neighbors for query 0:
+  0: id=12675 distance=1.71299e+09
+  1: id=28232 distance=1.98464e+09
+  2: id=37727 distance=2.03561e+09
+  3: id=8795 distance=2.09848e+09
+  4: id=27572 distance=2.10935e+09
+  5: id=16050 distance=2.12986e+09
+  6: id=28477 distance=2.17701e+09
+  7: id=12109 distance=2.18885e+09
+  8: id=47852 distance=2.19946e+09
+  9: id=12343 distance=2.20983e+09
+
+========================================
+Summary
+========================================
+Vectors               = 53387
+Queries                = 200
+Dimension              = 192
+HNSW storage total     = 53387
+NSG  storage total     = 53387
+HNSW build time (own thread) = 77.9151 sec
+NSG  build time (own thread) = 209.778 sec
+Parallel build wall time     = 209.782 sec
+HNSW QPS                = 3190.39
+NSG  QPS                = 2657.59
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 0-1 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/audio/base.fvecs /data/kabir/similarity-search/dataset/audio/query.fvecs /data/kabir/similarity-search/dataset/audio/groundtruth.ivecs /home/cc/datasets/codes/logs/audio-shared-index-separate_storage_parallal.csv"
+	User time (seconds): 263.36
+	System time (seconds): 41.45
+	Percent of CPU this job got: 145%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 3:29.97
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 205660
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 18
+	Minor (reclaiming a frame) page faults: 421761
+	Voluntary context switches: 620
+	Involuntary context switches: 9657
+	Swaps: 0
+	File system inputs: 960
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

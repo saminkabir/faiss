@@ -983,28 +983,28 @@ int main(
     // ========================================================
 
     const int HNSW_M =
-            32;
+            (argc >=6) ? argv[5] : 32;
 
     const int HNSW_EF_CONSTRUCTION =
-            100;
+            (argc >=7) ? argv[6] : 100;
 
     const int HNSW_EF_SEARCH =
-            64;
+            (argc >=8) ? argv[7] : 64;
 
     const int NSG_R =
-            32;
+            (argc >=9) ? argv[8] : 32;
 
     const int NSG_GK =
             64;
 
     const int NSG_SEARCH_L =
-            64;
+            (argc >=10) ? argv[9] : 64;
 
     const faiss::idx_t K =
-            10;
+            20;
 
     const size_t RECALL_EVAL_K =
-            10;
+            20;
 
 
     std::cout

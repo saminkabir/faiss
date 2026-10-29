@@ -983,22 +983,22 @@ int main(
     // ========================================================
 
     const int HNSW_M =
-            (argc >=6) ? argv[5] : 32;
+            (argc >=6) ? stoi(argv[5]) : 32;
 
     const int HNSW_EF_CONSTRUCTION =
-            (argc >=7) ? argv[6] : 100;
+            (argc >=7) ? stoi(argv[6]) : 100;
 
     const int HNSW_EF_SEARCH =
-            (argc >=8) ? argv[7] : 64;
+            (argc >=8) ? stoi(argv[7]) : 64;
 
     const int NSG_R =
-            (argc >=9) ? argv[8] : 32;
+            (argc >=9) ? stoi(argv[8]) : 32;
 
     const int NSG_GK =
             64;
 
     const int NSG_SEARCH_L =
-            (argc >=10) ? argv[9] : 64;
+            (argc >=10) ? stoi(argv[9]) : 64;
 
     const faiss::idx_t K =
             20;

@@ -45,6 +45,7 @@
 
 std::ofstream g_log_file;
 std::string g_run_timestamp;
+ using namespace std;
 
 void log_init(const std::string& path) {
 

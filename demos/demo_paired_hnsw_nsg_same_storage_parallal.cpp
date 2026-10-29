@@ -30,7 +30,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/stat.h>
-
+ using namespace std;
 
 // ============================================================
 // Simple timing log

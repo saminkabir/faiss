@@ -1,0 +1,160 @@
+Logging timings to: /data/kabir/similarity-search/models/faiss/datum_logs_new/glove-shared-index-separate_storage-parallel-index-stat-48-48-24-48-64.csv
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 48
+HNSW efConstruction = 24
+HNSW efSearch       = 48
+NSG R                = 48
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/glove/base.fvecs
+  vectors   = 1192514
+  dimension = 100
+
+Base dataset loaded
+d      = 100
+nb     = 1192514
+Reading /data/kabir/similarity-search/dataset/glove/query.fvecs
+  vectors   = 200
+  dimension = 100
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/glove/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 66 67
+HNSW thread -> CPU 66, NSG thread -> CPU 67
+HNSW build thread actually ran on CPU 66 (pinned to 66)
+NSG  build thread actually ran on CPU 67 (pinned to 67)
+HNSW graph build complete (ntotal = 1192514, 2082.66 sec on its own thread)
+NSG  graph build complete (ntotal = 1192514, 26680.6 sec on its own thread)
+Combined wall-clock time  = 26680.6 sec (vs. 28763.2 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 2082.66
+[LOG] construction | nsg_build_seconds = 26680.6
+[LOG] construction | parallel_build_wall_seconds = 26680.6
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x55913d320a00
+nsg.storage  = 0x55913d320b80
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 20
+
+Running HNSW batch search (efSearch = 48)...
+HNSW search time  = 0.127213 sec total, 0.636067 ms/query, 1572.16 QPS
+[LOG] query | hnsw_search_seconds_total = 0.127213
+[LOG] query | hnsw_ms_per_query = 0.636067
+[LOG] query | hnsw_qps = 1572.16
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.108958 sec total, 0.544789 ms/query, 1835.57 QPS
+[LOG] query | nsg_search_seconds_total = 0.108958
+[LOG] query | nsg_ms_per_query = 0.544789
+[LOG] query | nsg_qps = 1835.57
+
+----------------------------------------
+Recall@20
+----------------------------------------
+HNSW recall@20 = 0.68025
+NSG  recall@20 = 0.7455
+[LOG] query | hnsw_recall_at_20 = 0.68025
+[LOG] query | nsg_recall_at_20 = 0.7455
+
+HNSW neighbors for query 0:
+  0: id=431813 distance=12.645
+  1: id=75831 distance=13.8043
+  2: id=593609 distance=15.3018
+  3: id=953371 distance=15.4698
+  4: id=805530 distance=15.5689
+  5: id=500535 distance=15.7675
+  6: id=708202 distance=15.7696
+  7: id=72469 distance=15.9124
+  8: id=1150759 distance=15.9454
+  9: id=322494 distance=15.955
+  10: id=941971 distance=16.0711
+  11: id=117995 distance=16.1804
+  12: id=853904 distance=16.3388
+  13: id=823074 distance=16.5055
+  14: id=276290 distance=16.6139
+  15: id=1167249 distance=16.7316
+  16: id=951391 distance=16.8001
+  17: id=261568 distance=16.8768
+  18: id=118313 distance=16.9992
+  19: id=399102 distance=17.0905
+
+NSG neighbors for query 0:
+  0: id=431813 distance=12.645
+  1: id=75831 distance=13.8043
+  2: id=23284 distance=13.9485
+  3: id=593609 distance=15.3018
+  4: id=953371 distance=15.4698
+  5: id=720905 distance=15.5581
+  6: id=805530 distance=15.5689
+  7: id=500535 distance=15.7675
+  8: id=708202 distance=15.7696
+  9: id=72469 distance=15.9124
+  10: id=1150759 distance=15.9454
+  11: id=941971 distance=16.0711
+  12: id=117995 distance=16.1804
+  13: id=853904 distance=16.3388
+  14: id=1130935 distance=16.4965
+  15: id=823074 distance=16.5055
+  16: id=276290 distance=16.6139
+  17: id=1167249 distance=16.7316
+  18: id=951391 distance=16.8001
+  19: id=261568 distance=16.8768
+
+========================================
+Summary
+========================================
+Vectors               = 1192514
+Queries                = 200
+Dimension              = 100
+HNSW storage total     = 1192514
+NSG  storage total     = 1192514
+HNSW build time (own thread) = 2082.66 sec
+NSG  build time (own thread) = 26680.6 sec
+Parallel build wall time     = 26680.6 sec
+HNSW QPS                = 1572.16
+NSG  QPS                = 1835.57
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 66-67 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/glove/base.fvecs /data/kabir/similarity-search/dataset/glove/query.fvecs /data/kabir/similarity-search/dataset/glove/groundtruth.ivecs /data/kabir/similarity-search/models/faiss/datum_logs_new/glove-shared-index-separate_storage-parallel-index-stat-48-48-24-48-64.csv 48 24 48 48 64"
+	User time (seconds): 35416.77
+	System time (seconds): 16566.54
+	Percent of CPU this job got: 194%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 7:24:41
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3173340
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 12
+	Minor (reclaiming a frame) page faults: 58483454
+	Voluntary context switches: 3645
+	Involuntary context switches: 252171
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

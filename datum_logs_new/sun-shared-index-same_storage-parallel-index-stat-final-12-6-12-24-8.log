@@ -1,0 +1,183 @@
+Logging timings to: /data/kabir/similarity-search/models/faiss/datum_logs_new/sun-shared-index-same_storage-parallel-index-stat-12-6-12-24-8.csv
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 12
+HNSW efConstruction = 12
+HNSW efSearch       = 6
+NSG R                = 24
+NSG GK               = 64
+NSG search_L         = 8
+
+Reading /data/kabir/similarity-search/dataset/sun/base.fvecs
+  vectors   = 79106
+  dimension = 512
+
+Base dataset loaded
+d      = 512
+nb     = 79106
+Reading /data/kabir/similarity-search/dataset/sun/query.fvecs
+  vectors   = 200
+  dimension = 512
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/sun/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 79106
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 38 39
+HNSW thread -> CPU 38, NSG thread -> CPU 39
+HNSW build thread actually ran on CPU 38 (pinned to 38)
+NSG  build thread actually ran on CPU 39 (pinned to 39)
+HNSW graph build complete (ntotal = 79106, 103.847 sec on its own thread)
+NSG  graph build complete (ntotal = 79106, 751.765 sec on its own thread)
+Combined wall-clock time  = 751.781 sec (vs. 855.612 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 103.847
+[LOG] construction | nsg_build_seconds = 751.765
+[LOG] construction | parallel_build_wall_seconds = 751.781
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffeb40d3c10
+hnsw.storage           = 0x7ffeb40d3c10
+nsg.storage            = 0x7ffeb40d3c10
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 162009088 bytes (154.504 MB)
+  HNSW graph overhead    : 8891856 bytes (8.47993 MB)
+  NSG  graph overhead    : 7594176 bytes (7.24237 MB)
+  HNSW graph, compact CSR: 5556796 bytes (5.29937 MB)
+  NSG  graph, compact CSR: 4406804 bytes (4.20266 MB)
+  Combined (storage x1)  : 178495120 bytes (170.226 MB)
+  If storage were NOT shared, total would be 324.73 MB (saved 154.504 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 355.648 MB
+[LOG] index_size | storage_bytes = 1.62009e+08
+[LOG] index_size | hnsw_graph_overhead_bytes = 8.89186e+06
+[LOG] index_size | nsg_graph_overhead_bytes = 7.59418e+06
+[LOG] index_size | combined_bytes = 1.78495e+08
+
+========================================
+Query phase
+========================================
+nq = 200, k = 20
+
+Running HNSW batch search (efSearch = 6)...
+HNSW search time  = 0.0319583 sec total, 0.159791 ms/query, 6258.16 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0319583
+[LOG] query | hnsw_ms_per_query = 0.159791
+[LOG] query | hnsw_qps = 6258.16
+
+Running NSG batch search (search_L = 8)...
+NSG search time   = 0.131911 sec total, 0.659553 ms/query, 1516.18 QPS
+[LOG] query | nsg_search_seconds_total = 0.131911
+[LOG] query | nsg_ms_per_query = 0.659553
+[LOG] query | nsg_qps = 1516.18
+
+----------------------------------------
+Recall@20
+----------------------------------------
+HNSW recall@20 = 0.3635
+NSG  recall@20 = 0.7675
+[LOG] query | hnsw_recall_at_20 = 0.3635
+[LOG] query | nsg_recall_at_20 = 0.7675
+
+HNSW neighbors for query 0:
+  0: id=26056 distance=5.40225e+09
+  1: id=44096 distance=6.35863e+09
+  2: id=15905 distance=6.79236e+09
+  3: id=63567 distance=6.98892e+09
+  4: id=3343 distance=7.04851e+09
+  5: id=46171 distance=7.27517e+09
+  6: id=57395 distance=7.50993e+09
+  7: id=36703 distance=7.57006e+09
+  8: id=23096 distance=7.66754e+09
+  9: id=7564 distance=7.7048e+09
+  10: id=11323 distance=7.85854e+09
+  11: id=62579 distance=7.89577e+09
+  12: id=6739 distance=7.90047e+09
+  13: id=76002 distance=7.90893e+09
+  14: id=28108 distance=7.97912e+09
+  15: id=42635 distance=8.0033e+09
+  16: id=66198 distance=8.06449e+09
+  17: id=70251 distance=8.08634e+09
+  18: id=71506 distance=8.11851e+09
+  19: id=20270 distance=8.13783e+09
+
+NSG neighbors for query 0:
+  0: id=26056 distance=5.40225e+09
+  1: id=58975 distance=6.18492e+09
+  2: id=54351 distance=6.19411e+09
+  3: id=21998 distance=6.21907e+09
+  4: id=50337 distance=6.22869e+09
+  5: id=44498 distance=6.23157e+09
+  6: id=57488 distance=6.2904e+09
+  7: id=44096 distance=6.35863e+09
+  8: id=64927 distance=6.46307e+09
+  9: id=9274 distance=6.73812e+09
+  10: id=304 distance=6.75804e+09
+  11: id=15905 distance=6.79236e+09
+  12: id=69317 distance=6.85216e+09
+  13: id=71067 distance=6.8764e+09
+  14: id=9454 distance=6.90858e+09
+  15: id=63567 distance=6.98892e+09
+  16: id=51105 distance=7.0297e+09
+  17: id=2293 distance=7.03235e+09
+  18: id=61523 distance=7.04366e+09
+  19: id=3343 distance=7.04851e+09
+
+========================================
+Summary
+========================================
+Vectors               = 79106
+Queries                = 200
+Dimension              = 512
+Shared storage total   = 79106
+HNSW build time (own thread) = 103.847 sec
+NSG  build time (own thread) = 751.765 sec
+Parallel build wall time     = 751.781 sec
+HNSW QPS                = 6258.16
+NSG  QPS                = 1516.18
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 38-39 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/sun/base.fvecs /data/kabir/similarity-search/dataset/sun/query.fvecs /data/kabir/similarity-search/dataset/sun/groundtruth.ivecs /data/kabir/similarity-search/models/faiss/datum_logs_new/sun-shared-index-same_storage-parallel-index-stat-12-6-12-24-8.csv 12 12 6 24 8"
+	User time (seconds): 883.61
+	System time (seconds): 93.35
+	Percent of CPU this job got: 129%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:32.17
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 443256
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 15
+	Minor (reclaiming a frame) page faults: 1250953
+	Voluntary context switches: 564
+	Involuntary context switches: 10408
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

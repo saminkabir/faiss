@@ -1,0 +1,12 @@
+run_timestamp,phase,metric,value
+2026-10-29T04:55:28,construction,hnsw_build_seconds,23.232
+2026-10-29T04:55:28,construction,nsg_build_seconds,182.815
+2026-10-29T04:55:28,construction,parallel_build_wall_seconds,182.819
+2026-10-29T04:55:28,query,hnsw_search_seconds_total,0.0218961
+2026-10-29T04:55:28,query,hnsw_ms_per_query,0.109481
+2026-10-29T04:55:28,query,hnsw_qps,9134.03
+2026-10-29T04:55:28,query,nsg_search_seconds_total,0.0249125
+2026-10-29T04:55:28,query,nsg_ms_per_query,0.124563
+2026-10-29T04:55:28,query,nsg_qps,8028.09
+2026-10-29T04:55:28,query,hnsw_recall_at_20,0.8
+2026-10-29T04:55:28,query,nsg_recall_at_20,0.7765

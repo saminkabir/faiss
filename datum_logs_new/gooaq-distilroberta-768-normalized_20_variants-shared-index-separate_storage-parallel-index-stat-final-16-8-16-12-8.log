@@ -1,0 +1,161 @@
+WARNING: the input knn graph has 1 invalid entries
+Logging timings to: /data/kabir/similarity-search/models/faiss/datum_logs_new/gooaq-distilroberta-768-normalized_20_variants-shared-index-separate_storage-parallel-index-stat-16-8-16-12-8.csv
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 16
+HNSW efConstruction = 16
+HNSW efSearch       = 8
+NSG R                = 12
+NSG GK               = 64
+NSG search_L         = 8
+
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/base.fvecs
+  vectors   = 1000000
+  dimension = 768
+
+Base dataset loaded
+d      = 768
+nb     = 1000000
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 768
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 48 49
+HNSW thread -> CPU 48, NSG thread -> CPU 49
+HNSW build thread actually ran on CPU 48 (pinned to 48)
+NSG  build thread actually ran on CPU 49 (pinned to 49)
+HNSW graph build complete (ntotal = 1000000, 1399.06 sec on its own thread)
+NSG  graph build complete (ntotal = 1000000, 33048.9 sec on its own thread)
+Combined wall-clock time  = 33048.9 sec (vs. 34447.9 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 1399.06
+[LOG] construction | nsg_build_seconds = 33048.9
+[LOG] construction | parallel_build_wall_seconds = 33048.9
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x55925e0b1a30
+nsg.storage  = 0x55925e0b1c00
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 20
+
+Running HNSW batch search (efSearch = 8)...
+HNSW search time  = 0.0631484 sec total, 0.315742 ms/query, 3167.15 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0631484
+[LOG] query | hnsw_ms_per_query = 0.315742
+[LOG] query | hnsw_qps = 3167.15
+
+Running NSG batch search (search_L = 8)...
+NSG search time   = 0.0969614 sec total, 0.484807 ms/query, 2062.68 QPS
+[LOG] query | nsg_search_seconds_total = 0.0969614
+[LOG] query | nsg_ms_per_query = 0.484807
+[LOG] query | nsg_qps = 2062.68
+
+----------------------------------------
+Recall@20
+----------------------------------------
+HNSW recall@20 = 0.61725
+NSG  recall@20 = 0.82775
+[LOG] query | hnsw_recall_at_20 = 0.61725
+[LOG] query | nsg_recall_at_20 = 0.82775
+
+HNSW neighbors for query 0:
+  0: id=196996 distance=0.38066
+  1: id=235734 distance=1.24181
+  2: id=256971 distance=1.30593
+  3: id=28571 distance=1.32988
+  4: id=775278 distance=1.33475
+  5: id=29351 distance=1.33527
+  6: id=403111 distance=1.36445
+  7: id=366162 distance=1.3696
+  8: id=402284 distance=1.37142
+  9: id=931979 distance=1.38917
+  10: id=851698 distance=1.39581
+  11: id=522245 distance=1.41107
+  12: id=786251 distance=1.41431
+  13: id=987354 distance=1.42332
+  14: id=324660 distance=1.43399
+  15: id=181185 distance=1.43959
+  16: id=185575 distance=1.4416
+  17: id=293201 distance=1.4447
+  18: id=497043 distance=1.44548
+  19: id=796533 distance=1.45163
+
+NSG neighbors for query 0:
+  0: id=196996 distance=0.38066
+  1: id=701564 distance=0.398566
+  2: id=274364 distance=0.428514
+  3: id=144144 distance=0.435135
+  4: id=345489 distance=0.469991
+  5: id=912267 distance=0.471159
+  6: id=738547 distance=0.531916
+  7: id=495333 distance=0.53308
+  8: id=909154 distance=0.540374
+  9: id=700120 distance=0.548897
+  10: id=764131 distance=0.563918
+  11: id=940296 distance=0.565964
+  12: id=114939 distance=0.594268
+  13: id=397020 distance=0.609788
+  14: id=474425 distance=0.618625
+  15: id=376096 distance=0.635818
+  16: id=800382 distance=0.636459
+  17: id=781663 distance=0.690369
+  18: id=395050 distance=0.715736
+  19: id=275188 distance=0.726789
+
+========================================
+Summary
+========================================
+Vectors               = 1000000
+Queries                = 200
+Dimension              = 768
+HNSW storage total     = 1000000
+NSG  storage total     = 1000000
+HNSW build time (own thread) = 1399.06 sec
+NSG  build time (own thread) = 33048.9 sec
+Parallel build wall time     = 33048.9 sec
+HNSW QPS                = 3167.15
+NSG  QPS                = 2062.68
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 48-49 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/gooaq-distilroberta-768-normalized_20_variants/groundtruth.ivecs /data/kabir/similarity-search/models/faiss/datum_logs_new/gooaq-distilroberta-768-normalized_20_variants-shared-index-separate_storage-parallel-index-stat-16-8-16-12-8.csv 16 16 8 12 8"
+	User time (seconds): 47462.43
+	System time (seconds): 13080.43
+	Percent of CPU this job got: 183%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 9:10:56
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 9953060
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 386071395
+	Voluntary context switches: 10686
+	Involuntary context switches: 165070
+	Swaps: 0
+	File system inputs: 397216
+	File system outputs: 40
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

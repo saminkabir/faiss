@@ -1,0 +1,161 @@
+WARNING: the input knn graph has 469 invalid entries
+Logging timings to: /data/kabir/similarity-search/models/faiss/datum_logs_new/ccnews-nomic-768-normalized_20_variants-shared-index-separate_storage-parallel-index-stat-16-8-16-12-8.csv
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 16
+HNSW efConstruction = 16
+HNSW efSearch       = 8
+NSG R                = 12
+NSG GK               = 64
+NSG search_L         = 8
+
+Reading /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/base.fvecs
+  vectors   = 495328
+  dimension = 768
+
+Base dataset loaded
+d      = 768
+nb     = 495328
+Reading /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 768
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Building HNSW + NSG in parallel (separate storage)
+========================================
+Process CPU affinity list: 44 45
+HNSW thread -> CPU 44, NSG thread -> CPU 45
+HNSW build thread actually ran on CPU 44 (pinned to 44)
+NSG  build thread actually ran on CPU 45 (pinned to 45)
+HNSW graph build complete (ntotal = 495328, 859.008 sec on its own thread)
+NSG  graph build complete (ntotal = 495328, 10520.3 sec on its own thread)
+Combined wall-clock time  = 10520.3 sec (vs. 11379.3 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 859.008
+[LOG] construction | nsg_build_seconds = 10520.3
+[LOG] construction | parallel_build_wall_seconds = 10520.3
+
+========================================
+Verifying independent vector storage
+========================================
+hnsw.storage = 0x556cc510ba20
+nsg.storage  = 0x556cc510bbf0
+
+SUCCESS: HNSW and NSG were built in parallel, each on its own separate, independent vector storage.
+
+========================================
+Query phase
+========================================
+nq = 200, k = 20
+
+Running HNSW batch search (efSearch = 8)...
+HNSW search time  = 0.0776915 sec total, 0.388457 ms/query, 2574.29 QPS
+[LOG] query | hnsw_search_seconds_total = 0.0776915
+[LOG] query | hnsw_ms_per_query = 0.388457
+[LOG] query | hnsw_qps = 2574.29
+
+Running NSG batch search (search_L = 8)...
+NSG search time   = 0.113241 sec total, 0.566203 ms/query, 1766.15 QPS
+[LOG] query | nsg_search_seconds_total = 0.113241
+[LOG] query | nsg_ms_per_query = 0.566203
+[LOG] query | nsg_qps = 1766.15
+
+----------------------------------------
+Recall@20
+----------------------------------------
+HNSW recall@20 = 0.60575
+NSG  recall@20 = 0.81675
+[LOG] query | hnsw_recall_at_20 = 0.60575
+[LOG] query | nsg_recall_at_20 = 0.81675
+
+HNSW neighbors for query 0:
+  0: id=460655 distance=0.307838
+  1: id=118234 distance=0.314996
+  2: id=80550 distance=0.32106
+  3: id=218017 distance=0.353063
+  4: id=269547 distance=0.365991
+  5: id=362345 distance=0.379183
+  6: id=32329 distance=0.391833
+  7: id=222007 distance=0.406284
+  8: id=288364 distance=0.407173
+  9: id=323027 distance=0.40818
+  10: id=475054 distance=0.412706
+  11: id=98668 distance=0.414958
+  12: id=289961 distance=0.417967
+  13: id=49522 distance=0.418522
+  14: id=232394 distance=0.41958
+  15: id=397378 distance=0.419928
+  16: id=336922 distance=0.420863
+  17: id=387836 distance=0.423883
+  18: id=296144 distance=0.42406
+  19: id=95861 distance=0.425826
+
+NSG neighbors for query 0:
+  0: id=331646 distance=0.29912
+  1: id=460655 distance=0.307838
+  2: id=118234 distance=0.314996
+  3: id=80550 distance=0.32106
+  4: id=218017 distance=0.353063
+  5: id=269547 distance=0.365991
+  6: id=362345 distance=0.379183
+  7: id=346445 distance=0.389473
+  8: id=32329 distance=0.391833
+  9: id=306328 distance=0.39225
+  10: id=222007 distance=0.406284
+  11: id=288364 distance=0.407173
+  12: id=323027 distance=0.40818
+  13: id=475054 distance=0.412706
+  14: id=98668 distance=0.414958
+  15: id=289961 distance=0.417967
+  16: id=49522 distance=0.418522
+  17: id=232394 distance=0.41958
+  18: id=397378 distance=0.419928
+  19: id=409293 distance=0.420913
+
+========================================
+Summary
+========================================
+Vectors               = 495328
+Queries                = 200
+Dimension              = 768
+HNSW storage total     = 495328
+NSG  storage total     = 495328
+HNSW build time (own thread) = 859.008 sec
+NSG  build time (own thread) = 10520.3 sec
+Parallel build wall time     = 10520.3 sec
+HNSW QPS                = 2574.29
+NSG  QPS                = 1766.15
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 44-45 ./demo_paired_hnsw_nsg_separate_storage_parallal /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/ccnews-nomic-768-normalized_20_variants/groundtruth.ivecs /data/kabir/similarity-search/models/faiss/datum_logs_new/ccnews-nomic-768-normalized_20_variants-shared-index-separate_storage-parallel-index-stat-16-8-16-12-8.csv 16 16 8 12 8"
+	User time (seconds): 14511.73
+	System time (seconds): 3471.55
+	Percent of CPU this job got: 170%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:55:21
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 4947344
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 100035195
+	Voluntary context switches: 4434
+	Involuntary context switches: 89711
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 40
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

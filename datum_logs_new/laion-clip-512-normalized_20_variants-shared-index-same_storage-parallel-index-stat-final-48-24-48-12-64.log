@@ -1,0 +1,184 @@
+WARNING: the input knn graph has 4837 invalid entries
+Logging timings to: /data/kabir/similarity-search/models/faiss/datum_logs_new/laion-clip-512-normalized_20_variants-shared-index-same_storage-parallel-index-stat-48-24-48-12-64.csv
+
+========================================
+Paired HNSW + NSG Demo
+========================================
+HNSW M              = 48
+HNSW efConstruction = 48
+HNSW efSearch       = 24
+NSG R                = 12
+NSG GK               = 64
+NSG search_L         = 64
+
+Reading /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/base.fvecs
+  vectors   = 1000000
+  dimension = 512
+
+Base dataset loaded
+d      = 512
+nb     = 1000000
+Reading /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/query.fvecs
+  vectors   = 200
+  dimension = 512
+
+Query dataset loaded
+nq     = 200
+Reading /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/groundtruth.ivecs
+  queries with GT = 200
+  k (GT depth)    = 20
+
+========================================
+Populating shared storage
+========================================
+shared_storage.ntotal = 1000000
+
+========================================
+Building HNSW + NSG in parallel on shared storage
+========================================
+Process CPU affinity list: 10 11
+HNSW thread -> CPU 10, NSG thread -> CPU 11
+HNSW build thread actually ran on CPU 10 (pinned to 10)
+NSG  build thread actually ran on CPU 11 (pinned to 11)
+HNSW graph build complete (ntotal = 1000000, 4541.01 sec on its own thread)
+NSG  graph build complete (ntotal = 1000000, 30045.7 sec on its own thread)
+Combined wall-clock time  = 30045.7 sec (vs. 34586.7 sec if run sequentially)
+[LOG] construction | hnsw_build_seconds = 4541.01
+[LOG] construction | nsg_build_seconds = 30045.7
+[LOG] construction | parallel_build_wall_seconds = 30045.7
+
+========================================
+Verifying shared storage
+========================================
+shared_storage address = 0x7ffc94f13f00
+hnsw.storage           = 0x7ffc94f13f00
+nsg.storage            = 0x7ffc94f13f00
+
+SUCCESS: HNSW and NSG were built in parallel directly on one shared storage instance — no vectors were ever duplicated.
+
+========================================
+Index size breakdown (direct field measurement)
+========================================
+  Shared vector storage  : 2048000000 bytes (1953.12 MB)
+  HNSW graph overhead    : 400081044 bytes (381.547 MB)
+  NSG  graph overhead    : 48000000 bytes (45.7764 MB)
+  HNSW graph, compact CSR: 243349556 bytes (232.076 MB)
+  NSG  graph, compact CSR: 44460252 bytes (42.4006 MB)
+  Combined (storage x1)  : 2496081044 bytes (2380.45 MB)
+  If storage were NOT shared, total would be 4333.57 MB (saved 1953.12 MB by sharing)
+
+[process RSS, informational cross-check only — includes allocator/fragmentation overhead beyond just these three objects]
+  Current RSS            : 4357.84 MB
+[LOG] index_size | storage_bytes = 2.048e+09
+[LOG] index_size | hnsw_graph_overhead_bytes = 4.00081e+08
+[LOG] index_size | nsg_graph_overhead_bytes = 4.8e+07
+[LOG] index_size | combined_bytes = 2.49608e+09
+
+========================================
+Query phase
+========================================
+nq = 200, k = 20
+
+Running HNSW batch search (efSearch = 24)...
+HNSW search time  = 0.128655 sec total, 0.643276 ms/query, 1554.54 QPS
+[LOG] query | hnsw_search_seconds_total = 0.128655
+[LOG] query | hnsw_ms_per_query = 0.643276
+[LOG] query | hnsw_qps = 1554.54
+
+Running NSG batch search (search_L = 64)...
+NSG search time   = 0.148259 sec total, 0.741297 ms/query, 1348.99 QPS
+[LOG] query | nsg_search_seconds_total = 0.148259
+[LOG] query | nsg_ms_per_query = 0.741297
+[LOG] query | nsg_qps = 1348.99
+
+----------------------------------------
+Recall@20
+----------------------------------------
+HNSW recall@20 = 0.759
+NSG  recall@20 = 0.66775
+[LOG] query | hnsw_recall_at_20 = 0.759
+[LOG] query | nsg_recall_at_20 = 0.66775
+
+HNSW neighbors for query 0:
+  0: id=847588 distance=1.21973
+  1: id=874591 distance=1.22605
+  2: id=591313 distance=1.27262
+  3: id=476404 distance=1.29283
+  4: id=861293 distance=1.30346
+  5: id=809488 distance=1.30776
+  6: id=9698 distance=1.31878
+  7: id=984077 distance=1.31963
+  8: id=654215 distance=1.3246
+  9: id=725651 distance=1.33787
+  10: id=918833 distance=1.33825
+  11: id=126069 distance=1.34169
+  12: id=123240 distance=1.34315
+  13: id=65708 distance=1.34554
+  14: id=441140 distance=1.34671
+  15: id=166111 distance=1.34896
+  16: id=329690 distance=1.35072
+  17: id=204889 distance=1.35234
+  18: id=491647 distance=1.35247
+  19: id=234605 distance=1.35275
+
+NSG neighbors for query 0:
+  0: id=847588 distance=1.21973
+  1: id=874591 distance=1.22605
+  2: id=591313 distance=1.27262
+  3: id=476404 distance=1.29283
+  4: id=861293 distance=1.30346
+  5: id=809488 distance=1.30776
+  6: id=877725 distance=1.31424
+  7: id=9698 distance=1.31878
+  8: id=984077 distance=1.31963
+  9: id=654215 distance=1.3246
+  10: id=646057 distance=1.33494
+  11: id=725651 distance=1.33787
+  12: id=918833 distance=1.33825
+  13: id=126069 distance=1.34169
+  14: id=123240 distance=1.34315
+  15: id=65708 distance=1.34554
+  16: id=441140 distance=1.34671
+  17: id=166111 distance=1.34896
+  18: id=204889 distance=1.35234
+  19: id=491647 distance=1.35247
+
+========================================
+Summary
+========================================
+Vectors               = 1000000
+Queries                = 200
+Dimension              = 512
+Shared storage total   = 1000000
+HNSW build time (own thread) = 4541.01 sec
+NSG  build time (own thread) = 30045.7 sec
+Parallel build wall time     = 30045.7 sec
+HNSW QPS                = 1554.54
+NSG  QPS                = 1348.99
+
+========================================
+Done
+========================================
+	Command being timed: "taskset --cpu-list 10-11 ./demo_paired_hnsw_nsg_same_storage_parallal /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/base.fvecs /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/query.fvecs /data/kabir/similarity-search/dataset/laion-clip-512-normalized_20_variants/groundtruth.ivecs /data/kabir/similarity-search/models/faiss/datum_logs_new/laion-clip-512-normalized_20_variants-shared-index-same_storage-parallel-index-stat-48-24-48-12-64.csv 48 48 24 12 64"
+	User time (seconds): 42844.87
+	System time (seconds): 12857.31
+	Percent of CPU this job got: 185%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 8:21:39
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 5562112
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 10
+	Minor (reclaiming a frame) page faults: 241115729
+	Voluntary context switches: 22416
+	Involuntary context switches: 457373
+	Swaps: 0
+	File system inputs: 3808688
+	File system outputs: 40
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

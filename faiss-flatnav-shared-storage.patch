@@ -1,0 +1,5053 @@
+diff --git a/demos/CMakeLists.txt b/demos/CMakeLists.txt
+index f8d1876d..16adf681 100644
+--- a/demos/CMakeLists.txt
++++ b/demos/CMakeLists.txt
+@@ -37,4 +37,73 @@ target_link_libraries(demo_paired_hnsw_nsg_same_storage_parallal PRIVATE faiss)
+ add_executable(demo_paired_hnsw_nsg_separate_storage_parallal EXCLUDE_FROM_ALL demo_paired_hnsw_nsg_separate_storage_parallal.cpp)
+ target_link_libraries(demo_paired_hnsw_nsg_separate_storage_parallal PRIVATE faiss)
+ 
++# ---- FlatNav demos (shared / separate storage with faiss) ------------------
++# Point FLATNAV_ROOT at a FlatNav checkout that has ExternalVectorStorage
++# (branch `faiss-shared-storage`). AVX2 build (no AVX-512):
++#
++#   cmake -B build -DFAISS_OPT_LEVEL=avx2 -DFAISS_ENABLE_GPU=OFF \
++#         -DCMAKE_BUILD_TYPE=Release -DFLATNAV_ROOT=$HOME/flatnav .
++#   make -C build -j demo_paired_hnsw_flatnav_same_storage_parallel ...
++#
++# FLATNAV_SIMD selects how FlatNav's distance kernels are compiled
++# (FlatNav picks SSE/AVX/AVX-512 code from compiler macros, Macros.h):
++#   avx2    (default) -mavx2 -mfma -mf16c -mpopcnt, AVX-512 explicitly off
++#           (-mno-avx512f + a compile-time #error guard), linked to faiss_avx2
++#   native  -march=native (uses AVX-512 on CPUs that have it)
++#   generic no extra flags (SSE2 baseline)
++set(FLATNAV_ROOT "" CACHE PATH "Path to the FlatNav repository (header-only)")
++set(FLATNAV_SIMD avx2 CACHE STRING "SIMD level for the FlatNav demos: avx2, native, generic")
++set_property(CACHE FLATNAV_SIMD PROPERTY STRINGS avx2 native generic)
++if(FLATNAV_SIMD STREQUAL "avx2")
++  set(_flatnav_default_faiss_target faiss_avx2)
++else()
++  set(_flatnav_default_faiss_target faiss)
++endif()
++set(FLATNAV_FAISS_TARGET ${_flatnav_default_faiss_target} CACHE STRING
++    "faiss library target to link (faiss_avx2 for AVX2; needs -DFAISS_OPT_LEVEL=avx2)")
++
++if(FLATNAV_ROOT)
++  find_package(OpenMP REQUIRED)
++  find_package(Threads REQUIRED)
++  if(NOT TARGET ${FLATNAV_FAISS_TARGET})
++    message(FATAL_ERROR
++      "FLATNAV_FAISS_TARGET=${FLATNAV_FAISS_TARGET} does not exist. For AVX2 configure "
++      "faiss with -DFAISS_OPT_LEVEL=avx2 (creates faiss_avx2), or set FLATNAV_FAISS_TARGET.")
++  endif()
++  set(FLATNAV_INCLUDE_DIRS
++      ${FLATNAV_ROOT}/include
++      ${FLATNAV_ROOT}/external/cereal/include)
++
++  if(FLATNAV_SIMD STREQUAL "avx2")
++    set(FLATNAV_SIMD_FLAGS -mavx2 -mfma -mf16c -mpopcnt -mno-avx512f)
++    set(FLATNAV_SIMD_DEFS FLATNAV_FORBID_AVX512)
++  elseif(FLATNAV_SIMD STREQUAL "native")
++    set(FLATNAV_SIMD_FLAGS -march=native)
++    set(FLATNAV_SIMD_DEFS "")
++  else()
++    set(FLATNAV_SIMD_FLAGS "")
++    set(FLATNAV_SIMD_DEFS "")
++  endif()
++  message(STATUS "FlatNav demos: SIMD=${FLATNAV_SIMD}, faiss target=${FLATNAV_FAISS_TARGET}")
++
++  set(FLATNAV_DEMOS
++      demo_flatnav_shared_storage
++      demo_paired_hnsw_nsg_flatnav_same_storage_parallel
++      demo_paired_hnsw_flatnav_same_storage_parallel
++      demo_paired_hnsw_flatnav_separate_storage_parallel
++      demo_paired_nsg_flatnav_same_storage_parallel
++      demo_paired_nsg_flatnav_separate_storage_parallel)
++  foreach(demo ${FLATNAV_DEMOS})
++    add_executable(${demo} EXCLUDE_FROM_ALL ${demo}.cpp)
++    target_include_directories(${demo} PRIVATE ${FLATNAV_INCLUDE_DIRS})
++    target_compile_features(${demo} PRIVATE cxx_std_17)
++    target_link_libraries(${demo} PRIVATE ${FLATNAV_FAISS_TARGET} OpenMP::OpenMP_CXX Threads::Threads)
++    target_compile_options(${demo} PRIVATE -O3 ${FLATNAV_SIMD_FLAGS})
++    if(FLATNAV_SIMD_DEFS)
++      target_compile_definitions(${demo} PRIVATE ${FLATNAV_SIMD_DEFS})
++    endif()
++  endforeach()
++  add_custom_target(flatnav_demos DEPENDS ${FLATNAV_DEMOS})
++endif()
++
+ add_subdirectory(diversity_filter)
+diff --git a/demos/README_flatnav_shared_storage.md b/demos/README_flatnav_shared_storage.md
+new file mode 100644
+index 00000000..bdcc85b0
+--- /dev/null
++++ b/demos/README_flatnav_shared_storage.md
+@@ -0,0 +1,150 @@
++# FlatNav on Faiss shared storage
++
++FlatNav normally stores each node as `[vector][M links][label]` in one block.
++With the `faiss-shared-storage` FlatNav patch, an index can instead be built on
++an external, row-major buffer. A `faiss::IndexFlat` already keeps its vectors
++that way (`codes`, reachable with `get_xb()`). In that mode FlatNav allocates
++only `[M links][label]` per node and reads every vector from Faiss.
++
++* FlatNav node `i` == Faiss storage row `i` == Faiss id `i`, even with a
++  multi-threaded build.
++* No vector is copied. FlatNav's own memory is `n * (4*M + 4)` bytes.
++* Works with float32 `IndexFlatL2` (FlatNav `l2`) and `IndexFlatIP`
++  (FlatNav `angular`). Scalar-quantized FlatNav can't share, because its
++  internal vector format is different. You get an error if you try.
++* Graph reordering (`gorder` / `rcm`) is disabled in this mode, because it
++  physically moves vectors and would break the shared ids.
++* `saveIndex` writes the graph only. After `loadIndex`, call
++  `attachExternalStorage` (C++) or `attach_storage` (Python). Older FlatNav
++  index files still load as before.
++
++## C++
++
++```cpp
++#include "flatnav_faiss_storage.hpp"
++
++faiss::IndexFlatL2 shared_storage(d);
++shared_storage.add(n, xb);                       // the only copy of the vectors
++
++faiss::IndexHNSW hnsw(&shared_storage, M);       // as in the same-storage demo
++faiss::IndexNSG  nsg (&shared_storage, R);
++auto flatnav = flatnav_faiss::make_flatnav_l2(shared_storage, M);
++
++flatnav_faiss::build(*flatnav, ef_construction, /*num_threads=*/1);
++flatnav_faiss::search(*flatnav, nq, xq, k, ef_search, D, I);   // I are faiss ids
++```
++
++Build (AVX2, no AVX-512):
++
++```bash
++cmake -B build -DFAISS_OPT_LEVEL=avx2 -DFAISS_ENABLE_GPU=OFF -DFAISS_ENABLE_PYTHON=OFF \
++      -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release -DFLATNAV_ROOT=/path/to/flatnav .
++make -C build -j faiss_avx2 flatnav_demos      # builds all six FlatNav demos
++```
++
++`FLATNAV_SIMD=avx2` is the default:
++
++* FlatNav is compiled with `-mavx2 -mfma -mf16c -mpopcnt -mno-avx512f`.
++* The demos link `faiss_avx2`, so they need `-DFAISS_OPT_LEVEL=avx2`.
++* A compile-time `#error` stops the build if AVX-512 gets switched back on,
++  for example by `-march=native` in `CMAKE_CXX_FLAGS`.
++* At startup, every pair demo prints and logs the SIMD level faiss and
++  FlatNav use (`config,faiss_avx2/avx512,flatnav_avx2/avx512` rows in the
++  CSV), and aborts if faiss is an AVX-512 build.
++* To check a binary yourself, run
++  `objdump -d build/demos/<demo> | grep -c %zmm`. It should print 0.
++
++`-DFLATNAV_SIMD=native` restores `-march=native`.
++
++## Pair demos: {HNSW, NSG} x FlatNav, {same, separate} storage
++
++| demo | faiss index | FlatNav | vectors in memory |
++|---|---|---|---|
++| `demo_paired_hnsw_flatnav_same_storage_parallel` | `IndexHNSW(&shared_storage)` | graph on `shared_storage` | 1 copy |
++| `demo_paired_hnsw_flatnav_separate_storage_parallel` | `IndexHNSWFlat` (own storage) | owned FlatNav index | 2 copies |
++| `demo_paired_nsg_flatnav_same_storage_parallel` | `IndexNSG(&shared_storage)` | graph on `shared_storage` | 1 copy |
++| `demo_paired_nsg_flatnav_separate_storage_parallel` | `IndexNSGFlat` (own storage) | owned FlatNav index | 2 copies |
++
++All four:
++
++* build the two indexes in parallel, one pinned thread each, with OpenMP set
++  to 1 inside the faiss thread;
++* check that storage is shared or separate, with checks that still run in
++  Release builds;
++* report storage and graph bytes, then query both indexes with all CPUs;
++* write the same CSV metrics as the HNSW+NSG demos (`<index>_qps`,
++  `<index>_recall_at_20`, `storage_bytes`, `combined_bytes`, ...).
++
++The shared helpers are in `paired_flatnav_common.hpp`. Its first part is
++copied from `demo_paired_hnsw_nsg_same_storage_parallal.cpp`.
++
++```bash
++# HNSW + FlatNav:  [HNSW_M HNSW_efC HNSW_efS FLATNAV_M FLATNAV_efC FLATNAV_efS]
++taskset -c 0-1 ./build/demos/demo_paired_hnsw_flatnav_same_storage_parallel \
++    base.fvecs query.fvecs gt.ivecs log.csv  32 100 64  32 100 64
++taskset -c 0-1 ./build/demos/demo_paired_hnsw_flatnav_separate_storage_parallel \
++    base.fvecs query.fvecs gt.ivecs log.csv  32 100 64  32 100 64
++
++# NSG + FlatNav:   [NSG_R NSG_search_L FLATNAV_M FLATNAV_efC FLATNAV_efS]  (NSG GK = 64)
++taskset -c 0-1 ./build/demos/demo_paired_nsg_flatnav_same_storage_parallel \
++    base.fvecs query.fvecs gt.ivecs log.csv  32 64  32 100 64
++taskset -c 0-1 ./build/demos/demo_paired_nsg_flatnav_separate_storage_parallel \
++    base.fvecs query.fvecs gt.ivecs log.csv  32 64  32 100 64
++```
++
++Pass `-` instead of `gt.ivecs` to skip recall.
++
++Other FlatNav demos:
++
++* `demo_flatnav_shared_storage --synthetic 100000 128` runs FlatNav alone on
++  a shared `IndexFlatL2`.
++* `demo_paired_hnsw_nsg_flatnav_same_storage_parallel` runs HNSW, NSG and
++  FlatNav on one storage. It takes the original HNSW/NSG arguments followed
++  by `FLATNAV_M FLATNAV_efC FLATNAV_efS`.
++
++Note: the original `demo_paired_hnsw_nsg_*` targets link `faiss`, not
++`faiss_avx2`. With `-DFAISS_OPT_LEVEL=avx2`, `faiss` is the generic (non-AVX2)
++build. Switch their `target_link_libraries` to `faiss_avx2` if you compare
++their numbers with the FlatNav demos.
++
++## Python
++
++Build both libraries for AVX2:
++
++* **FlatNav:** `FLATNAV_SIMD=avx2` is the default in
++  `python-bindings/setup.py`. `flatnav.simd_level` reports what was compiled.
++  `FLATNAV_SIMD=native` restores `-march=native`.
++* **faiss built from source:** use `-DFAISS_OPT_LEVEL=avx2`,
++  `make swigfaiss_avx2`, and run with `FAISS_OPT_LEVEL=AVX2`.
++* **pip faiss-cpu (dynamic dispatch):** run with `FAISS_SIMD_LEVEL=AVX2`, then
++  check `faiss.SIMDConfig.get_level_name()`.
++
++```python
++import faiss, flatnav
++
++storage = faiss.IndexFlatL2(d)
++storage.add(xb)
++
++index = flatnav.index.create(distance_type="l2", dim=d, dataset_size=storage.ntotal,
++                             max_edges_per_node=32, external_storage=storage)
++index.set_num_threads(8)
++index.add_from_storage(ef_construction=100)        # node i == faiss id i
++D, I = index.search(xq, K=10, ef_search=64)
++
++# external_storage also accepts faiss.IndexHNSWFlat / IndexNSGFlat (uses .storage)
++# or a C-contiguous numpy array. The index keeps the faiss object alive.
++index.save("graph.flatnav")                        # graph only
++g = flatnav.index.IndexL2Float.load_index("graph.flatnav")
++g.attach_storage(storage)
++```
++
++## Caveats
++
++* Don't call `storage.add()` while FlatNav is searching. A `std::vector`
++  that grows can move its buffer. If you do grow it, re-attach (Python's
++  `add_from_storage` does this for you) before the next build or search.
++* With the split layout, each hop touches two memory regions (links and
++  vector) instead of one. In a 200k x 128-d test on a 2-core VM, search QPS
++  was about 1-6% below FlatNav's own interleaved layout, after prefetching
++  the links. Build time was within about 5%. If you compare FlatNav's QPS
++  against its default layout, report which layout you used.
+diff --git a/demos/demo_flatnav_shared_storage.cpp b/demos/demo_flatnav_shared_storage.cpp
+new file mode 100644
+index 00000000..f2d0e043
+--- /dev/null
++++ b/demos/demo_flatnav_shared_storage.cpp
+@@ -0,0 +1,251 @@
++// ============================================================
++// demo_flatnav_shared_storage.cpp
++//
++// Build a FlatNav graph directly on a faiss::IndexFlatL2 (shared storage).
++//
++//   faiss::IndexFlatL2 shared_storage(d);  shared_storage.add(n, xb);
++//   auto flatnav = flatnav_faiss::make_flatnav_l2(shared_storage, M);
++//   flatnav_faiss::build(*flatnav, ef_construction, threads);
++//
++// FlatNav allocates only its graph; every distance reads the vector out of
++// shared_storage.codes. Node id i == faiss id i, so the same storage can also
++// back IndexHNSW(&shared_storage) / IndexNSG(&shared_storage) (see
++// demo_paired_hnsw_nsg_same_storage_parallal.cpp) and results are directly
++// comparable.
++//
++// Usage:
++//   demo_flatnav_shared_storage base.fvecs query.fvecs [gt.ivecs|-] [M] [efC] [efS] [threads]
++//   demo_flatnav_shared_storage --synthetic [n] [d] [M] [efC] [efS] [threads]
++//
++// If no ground truth is given, exact kNN is computed with shared_storage.search()
++// (the same IndexFlatL2 FlatNav is reading from).
++// ============================================================
++
++#include <faiss/IndexFlat.h>
++
++#include "flatnav_faiss_storage.hpp"
++
++#include <omp.h>
++#include <sys/stat.h>
++#include <algorithm>
++#include <cassert>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <iostream>
++#include <memory>
++#include <random>
++#include <string>
++#include <thread>
++#include <unordered_set>
++#include <vector>
++
++namespace {
++
++double now_s() {
++    return std::chrono::duration<double>(
++                   std::chrono::steady_clock::now().time_since_epoch())
++            .count();
++}
++
++// .fvecs / .ivecs readers (same format as the faiss demos). Caller owns memory.
++float* fvecs_read(const char* fname, size_t* d_out, size_t* n_out) {
++    FILE* f = fopen(fname, "rb");
++    if (!f) {
++        fprintf(stderr, "could not open %s\n", fname);
++        perror("");
++        std::abort();
++    }
++    int d;
++    if (fread(&d, 1, sizeof(int), f) != sizeof(int)) {
++        fprintf(stderr, "could not read %s\n", fname);
++        std::abort();
++    }
++    assert((d > 0 && d < 1000000) || !"unreasonable dimension");
++    fseek(f, 0, SEEK_SET);
++    struct stat st;
++    fstat(fileno(f), &st);
++    size_t sz = st.st_size;
++    assert(sz % ((d + 1) * 4) == 0 || !"weird file size");
++    size_t n = sz / ((d + 1) * 4);
++    *d_out = d;
++    *n_out = n;
++    float* x = new float[n * (d + 1)];
++    size_t nr = fread(x, sizeof(float), n * (d + 1), f);
++    assert(nr == n * (d + 1) || !"could not read whole file");
++    for (size_t i = 0; i < n; i++) {
++        memmove(x + i * d, x + 1 + i * (d + 1), d * sizeof(*x));
++    }
++    fclose(f);
++    return x;
++}
++
++int* ivecs_read(const char* fname, size_t* d_out, size_t* n_out) {
++    return reinterpret_cast<int*>(fvecs_read(fname, d_out, n_out));
++}
++
++float* synthetic(size_t n, size_t d, uint32_t seed) {
++    // Low intrinsic dimension (like real embeddings): x = A z + noise, z in R^16.
++    // The projection A is fixed (seed 1234) so base and queries share it.
++    const size_t r = std::min<size_t>(16, d);
++    std::mt19937 arng(1234);
++    std::normal_distribution<float> g(0.f, 1.f);
++    std::vector<float> A(d * r);
++    for (auto& v : A) v = g(arng);
++    std::mt19937 rng(seed);
++    float* x = new float[n * d];
++    std::vector<float> z(r);
++    for (size_t i = 0; i < n; i++) {
++        for (auto& v : z) v = g(rng);
++        for (size_t j = 0; j < d; j++) {
++            float s = 0.1f * g(rng);
++            for (size_t k = 0; k < r; k++) s += A[j * r + k] * z[k];
++            x[i * d + j] = s;
++        }
++    }
++    return x;
++}
++
++double recall_at_k(const faiss::idx_t* I, const faiss::idx_t* gt, size_t nq, int k, int gt_k) {
++    size_t hits = 0;
++    for (size_t q = 0; q < nq; q++) {
++        std::unordered_set<faiss::idx_t> truth(gt + q * gt_k, gt + q * gt_k + k);
++        for (int j = 0; j < k; j++) hits += truth.count(I[q * k + j]);
++    }
++    return static_cast<double>(hits) / (nq * k);
++}
++
++} // namespace
++
++int main(int argc, char** argv) {
++    if (argc < 2) {
++        std::cerr << "Usage:\n  " << argv[0]
++                  << " base.fvecs query.fvecs [gt.ivecs|-] [M] [efC] [efS] [threads]\n  " << argv[0]
++                  << " --synthetic [n] [d] [M] [efC] [efS] [threads]\n";
++        return 1;
++    }
++
++    const bool synth = std::string(argv[1]) == "--synthetic";
++    size_t d = 0, n = 0, nq = 0;
++    float* xb = nullptr;
++    float* xq = nullptr;
++    int* gt_raw = nullptr;
++    size_t gt_k = 0;
++    int a = 0;  // index of the first numeric parameter
++
++    if (synth) {
++        n = argc > 2 ? std::stoul(argv[2]) : 100000;
++        d = argc > 3 ? std::stoul(argv[3]) : 128;
++        nq = 1000;
++        xb = synthetic(n, d, 1);
++        xq = synthetic(nq, d, 2);
++        a = 4;
++    } else {
++        if (argc < 3) {
++            std::cerr << "need base.fvecs and query.fvecs\n";
++            return 1;
++        }
++        size_t dq;
++        xb = fvecs_read(argv[1], &d, &n);
++        xq = fvecs_read(argv[2], &dq, &nq);
++        assert(d == dq);
++        if (argc > 3 && std::string(argv[3]) != "-") {
++            size_t ngt;
++            gt_raw = ivecs_read(argv[3], &gt_k, &ngt);
++            assert(ngt == nq);
++        }
++        a = 4;
++    }
++    const int M = argc > a ? std::stoi(argv[a]) : 32;
++    const int EF_C = argc > a + 1 ? std::stoi(argv[a + 1]) : 100;
++    const int EF_S = argc > a + 2 ? std::stoi(argv[a + 2]) : 64;
++    const int THREADS = argc > a + 3 ? std::stoi(argv[a + 3])
++                                     : static_cast<int>(std::thread::hardware_concurrency());
++    const int K = 10;
++
++    printf("n=%zu d=%zu nq=%zu | M=%d efC=%d efS=%d threads=%d\n", n, d, nq, M, EF_C, EF_S, THREADS);
++
++    // --------------------------------------------------------
++    // 1. Populate ONE faiss storage. This is the only copy of the vectors.
++    // --------------------------------------------------------
++    faiss::IndexFlatL2 shared_storage(static_cast<faiss::idx_t>(d));
++    shared_storage.add(static_cast<faiss::idx_t>(n), xb);
++    delete[] xb;  // FlatNav never sees xb: it reads shared_storage directly
++    xb = nullptr;
++
++    // --------------------------------------------------------
++    // 2. FlatNav graph on the shared storage (no vector copy).
++    // --------------------------------------------------------
++    auto flatnav = flatnav_faiss::make_flatnav_l2(shared_storage, M);
++
++    double t0 = now_s();
++    flatnav_faiss::build(*flatnav, EF_C, THREADS);
++    double build_s = now_s() - t0;
++    printf("FlatNav build on shared storage: %.2f s (%zu nodes)\n", build_s, flatnav->currentNumNodes());
++
++    // --------------------------------------------------------
++    // 3. Verify the storage really is shared.
++    // --------------------------------------------------------
++    assert(flatnav->usesExternalStorage());
++    assert(flatnav->externalStorageData() == static_cast<const void*>(shared_storage.get_xb()));
++    const uint64_t vec_bytes = shared_storage.codes.size();
++    const uint64_t graph_bytes = flatnav_faiss::graph_bytes(*flatnav);
++    const uint64_t owned_equiv = graph_bytes + static_cast<uint64_t>(n) * d * sizeof(float);
++    printf("shared_storage.get_xb()      = %p\n", static_cast<const void*>(shared_storage.get_xb()));
++    printf("flatnav external data ptr    = %p\n", flatnav->externalStorageData());
++    printf("faiss vectors (shared)       = %.1f MB\n", vec_bytes / 1e6);
++    printf("flatnav graph (links+labels) = %.1f MB  (node = %zu B)\n", graph_bytes / 1e6,
++           flatnav->nodeSizeBytes());
++    printf("flatnav with its own copy    = %.1f MB  -> saved %.1f MB\n", owned_equiv / 1e6,
++           (owned_equiv - graph_bytes) / 1e6);
++
++    // --------------------------------------------------------
++    // 4. Ground truth: given, or exact search on the SAME storage.
++    // --------------------------------------------------------
++    std::vector<faiss::idx_t> gt;
++    if (gt_raw) {
++        gt.assign(gt_raw, gt_raw + nq * gt_k);
++        delete[] gt_raw;
++    } else {
++        gt_k = K;
++        gt.resize(nq * K);
++        std::vector<float> gd(nq * K);
++        shared_storage.search(static_cast<faiss::idx_t>(nq), xq, K, gd.data(), gt.data());
++    }
++
++    // --------------------------------------------------------
++    // 5. Search FlatNav; ids are faiss ids.
++    // --------------------------------------------------------
++    std::vector<float> D(nq * K);
++    std::vector<faiss::idx_t> I(nq * K);
++    for (int ef : {EF_S / 2, EF_S, EF_S * 2, EF_S * 4}) {
++        if (ef < K) continue;
++        double s0 = now_s();
++        flatnav_faiss::search(*flatnav, static_cast<faiss::idx_t>(nq), xq, K, ef, D.data(), I.data(), 1);
++        double dt = now_s() - s0;
++        printf("FlatNav efS=%4d  recall@%d=%.4f  QPS(1 thread)=%.0f\n", ef, K,
++               recall_at_k(I.data(), gt.data(), nq, K, static_cast<int>(gt_k)), nq / dt);
++    }
++
++    // --------------------------------------------------------
++    // 6. Save only the graph; reload and re-attach to the faiss storage.
++    //    (Persist the vectors with faiss::write_index(&shared_storage, ...).)
++    // --------------------------------------------------------
++    const std::string graph_file = "flatnav_shared_storage.graph";
++    flatnav->saveIndex(graph_file);
++    auto reloaded = flatnav_faiss::FlatNavL2::loadIndex(graph_file);
++    flatnav_faiss::reattach(*reloaded, shared_storage);
++    std::vector<faiss::idx_t> I2(nq * K);
++    std::vector<float> D2(nq * K);
++    flatnav_faiss::search(*reloaded, static_cast<faiss::idx_t>(nq), xq, K, EF_S, D2.data(), I2.data(), 1);
++    flatnav_faiss::search(*flatnav, static_cast<faiss::idx_t>(nq), xq, K, EF_S, D.data(), I.data(), 1);
++    struct stat st;
++    stat(graph_file.c_str(), &st);
++    printf("graph file: %.1f MB, reloaded results identical: %s\n", st.st_size / 1e6, I == I2 ? "yes" : "NO");
++    std::remove(graph_file.c_str());
++
++    delete[] xq;
++    printf("OK\n");
++    return I == I2 ? 0 : 2;
++}
+diff --git a/demos/demo_paired_hnsw_flatnav_same_storage_parallel.cpp b/demos/demo_paired_hnsw_flatnav_same_storage_parallel.cpp
+new file mode 100644
+index 00000000..06c9eec4
+--- /dev/null
++++ b/demos/demo_paired_hnsw_flatnav_same_storage_parallel.cpp
+@@ -0,0 +1,236 @@
++// ============================================================
++// demo_paired_hnsw_flatnav_same_storage_parallel.cpp
++//
++// HNSW (faiss) + FlatNav built in parallel on ONE shared
++// faiss::IndexFlatL2. The vectors exist exactly once:
++//
++//   shared_storage (IndexFlatL2)  <- the only copy of the vectors
++//     ^                    ^
++//     |                    |
++//   faiss::IndexHNSW     FlatNav (graph only: M links + label per node,
++//   (&shared_storage)     distances read from shared_storage.codes)
++//
++// Node / vector id i is the same in both indexes, so results can be
++// compared or paired directly.
++//
++// Each build runs on its own pinned CPU with exactly one thread.
++// FlatNav and faiss are both compiled for AVX2 (no AVX-512); the
++// SIMD configuration is printed and logged at startup.
++//
++// Usage:
++//   demo_paired_hnsw_flatnav_same_storage_parallel
++//       base.fvecs query.fvecs [gt.ivecs|-] [log.csv]
++//       [HNSW_M=32] [HNSW_efConstruction=100] [HNSW_efSearch=64]
++//       [FLATNAV_M=32] [FLATNAV_efConstruction=100] [FLATNAV_efSearch=64]
++// ============================================================
++
++#include "paired_flatnav_common.hpp"
++
++int main(int argc, char** argv) {
++    if (argc < 3) {
++        std::cerr << "Usage:\n  " << argv[0]
++                  << " base.fvecs query.fvecs [gt.ivecs|-] [log.csv]"
++                  << " [HNSW_M] [HNSW_efC] [HNSW_efS]"
++                  << " [FLATNAV_M] [FLATNAV_efC] [FLATNAV_efS]\n";
++        return 1;
++    }
++    const char* base_file = argv[1];
++    const char* query_file = argv[2];
++    const char* gt_file = (argc >= 4) ? argv[3] : nullptr;
++    const std::string log_path = (argc >= 5) ? argv[4] : "benchmark_log.csv";
++    log_init(log_path);
++
++    // ========================================================
++    // Parameters
++    // ========================================================
++    const int HNSW_M = (argc >= 6) ? stoi(argv[5]) : 32;
++    const int HNSW_EF_CONSTRUCTION = (argc >= 7) ? stoi(argv[6]) : 100;
++    const int HNSW_EF_SEARCH = (argc >= 8) ? stoi(argv[7]) : 64;
++    const int FLATNAV_M = (argc >= 9) ? stoi(argv[8]) : 32;
++    const int FLATNAV_EF_CONSTRUCTION = (argc >= 10) ? stoi(argv[9]) : 100;
++    const int FLATNAV_EF_SEARCH = (argc >= 11) ? stoi(argv[10]) : 64;
++    const faiss::idx_t K = 20;
++    const size_t RECALL_EVAL_K = 20;
++
++    std::cout << "\n========================================\n"
++              << "Paired HNSW + FlatNav Demo (same storage)\n"
++              << "========================================\n"
++              << "HNSW M                 = " << HNSW_M << "\n"
++              << "HNSW efConstruction    = " << HNSW_EF_CONSTRUCTION << "\n"
++              << "HNSW efSearch          = " << HNSW_EF_SEARCH << "\n"
++              << "FlatNav M              = " << FLATNAV_M << "\n"
++              << "FlatNav efConstruction = " << FLATNAV_EF_CONSTRUCTION << "\n"
++              << "FlatNav efSearch       = " << FLATNAV_EF_SEARCH << "\n";
++    log_metric("params", "hnsw_M", HNSW_M);
++    log_metric("params", "hnsw_ef_construction", HNSW_EF_CONSTRUCTION);
++    log_metric("params", "hnsw_ef_search", HNSW_EF_SEARCH);
++    log_metric("params", "flatnav_M", FLATNAV_M);
++    log_metric("params", "flatnav_ef_construction", FLATNAV_EF_CONSTRUCTION);
++    log_metric("params", "flatnav_ef_search", FLATNAV_EF_SEARCH);
++
++    report_simd_config();
++
++    PairDataset ds;
++    if (!load_pair_dataset(base_file, query_file, gt_file, RECALL_EVAL_K, ds)) {
++        return 1;
++    }
++    const int d = ds.d;
++    const faiss::idx_t n = ds.n;
++
++    // ========================================================
++    // Populate ONE shared storage, once
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Populating shared storage\n"
++              << "========================================\n";
++    faiss::IndexFlatL2 shared_storage(d);
++    shared_storage.add(n, ds.xb);
++    std::cout << "shared_storage.ntotal = " << shared_storage.ntotal << "\n";
++
++    // ========================================================
++    // Construct both indexes directly on the shared storage
++    // ========================================================
++    // Index*-taking ctor: own_fields = false, HNSW never adds to or
++    // frees shared_storage.
++    faiss::IndexHNSW hnsw(&shared_storage, HNSW_M);
++    hnsw.hnsw.efConstruction = HNSW_EF_CONSTRUCTION;
++    hnsw.hnsw.efSearch = HNSW_EF_SEARCH;
++    PAIR_CHECK(!hnsw.own_fields);
++
++    // FlatNav reads shared_storage.codes directly (no copy).
++    auto flatnav_index = flatnav_faiss::make_flatnav_l2(shared_storage, FLATNAV_M);
++    PAIR_CHECK(flatnav_index->usesExternalStorage());
++
++    // ========================================================
++    // Build both graphs in parallel, one pinned thread each
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Building HNSW + FlatNav in parallel on shared storage\n"
++              << "========================================\n";
++    const int total_threads = available_cpu_count();
++    const std::pair<int, int> build_cpus = pick_two_cpus();
++    const int cpu_for_hnsw = build_cpus.first;
++    const int cpu_for_flatnav = build_cpus.second;
++    std::cout << "HNSW thread -> CPU " << cpu_for_hnsw << ", FlatNav thread -> CPU "
++              << cpu_for_flatnav << "\n";
++
++    PinnedBuild hnsw_build, flatnav_build;
++    double parallel_build_wall_seconds = time_seconds([&]() {
++        std::thread hnsw_thread = start_pinned_build(cpu_for_hnsw, hnsw_build, [&]() {
++            build_hnsw_graph_on_shared_storage(
++                    hnsw, static_cast<size_t>(n), ds.xb, /*verbose=*/false);
++        });
++        std::thread flatnav_thread = start_pinned_build(cpu_for_flatnav, flatnav_build, [&]() {
++            flatnav_faiss::build(*flatnav_index, FLATNAV_EF_CONSTRUCTION, /*num_threads=*/1);
++        });
++        hnsw_thread.join();
++        flatnav_thread.join();
++    });
++
++    std::cout << "HNSW    build: " << hnsw_build.seconds << " sec on CPU " << hnsw_build.ran_on_cpu
++              << " (pinned to " << hnsw_build.requested_cpu << "), ntotal = " << hnsw.ntotal << "\n"
++              << "FlatNav build: " << flatnav_build.seconds << " sec on CPU "
++              << flatnav_build.ran_on_cpu << " (pinned to " << flatnav_build.requested_cpu
++              << "), nodes = " << flatnav_index->currentNumNodes() << "\n"
++              << "Combined wall-clock time = " << parallel_build_wall_seconds << " sec (vs. "
++              << (hnsw_build.seconds + flatnav_build.seconds) << " sec if run sequentially)\n";
++    log_metric("construction", "hnsw_build_seconds", hnsw_build.seconds);
++    log_metric("construction", "flatnav_build_seconds", flatnav_build.seconds);
++    log_metric("construction", "parallel_build_wall_seconds", parallel_build_wall_seconds);
++
++    // ========================================================
++    // Verify the storage really was shared
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Verifying shared storage\n"
++              << "========================================\n"
++              << "shared_storage address      = " << static_cast<void*>(&shared_storage) << "\n"
++              << "hnsw.storage                = " << static_cast<void*>(hnsw.storage) << "\n"
++              << "shared_storage.get_xb()     = "
++              << static_cast<const void*>(shared_storage.get_xb()) << "\n"
++              << "FlatNav vector pointer      = " << flatnav_index->externalStorageData() << "\n";
++    PAIR_CHECK(hnsw.storage == &shared_storage);
++    PAIR_CHECK(!hnsw.own_fields);
++    PAIR_CHECK(flatnav_index->externalStorageData() ==
++               static_cast<const void*>(shared_storage.get_xb()));
++    PAIR_CHECK(shared_storage.ntotal == n);
++    PAIR_CHECK(hnsw.ntotal == n);
++    PAIR_CHECK(flatnav_index->currentNumNodes() == static_cast<size_t>(n));
++    std::cout << "\nSUCCESS: HNSW and FlatNav were built in parallel directly on one "
++              << "shared storage instance — no vectors were ever duplicated.\n";
++
++    // ========================================================
++    // Index sizes
++    // ========================================================
++    const size_t storage_bytes = flat_storage_bytes_direct(shared_storage);
++    const size_t hnsw_graph = hnsw_graph_bytes_direct(hnsw.hnsw);
++    const size_t flatnav_graph = flatnav_faiss::graph_overhead_bytes(*flatnav_index);
++    const size_t combined = storage_bytes + hnsw_graph + flatnav_graph;
++    const size_t unshared = 2 * storage_bytes + hnsw_graph + flatnav_graph;
++    std::cout << "\n========================================\n"
++              << "Index size breakdown\n"
++              << "========================================\n"
++              << "  Shared vector storage   : " << to_mb(storage_bytes) << " MB\n"
++              << "  HNSW graph overhead     : " << to_mb(hnsw_graph) << " MB\n"
++              << "  FlatNav graph overhead  : " << to_mb(flatnav_graph) << " MB\n"
++              << "  Combined (storage x1)   : " << to_mb(combined) << " MB\n"
++              << "  If not shared           : " << to_mb(unshared) << " MB (saved "
++              << to_mb(unshared - combined) << " MB)\n"
++              << "  Current RSS             : " << to_mb(get_current_rss_bytes()) << " MB\n";
++    log_metric("index_size", "storage_bytes", static_cast<double>(storage_bytes));
++    log_metric("index_size", "hnsw_graph_overhead_bytes", static_cast<double>(hnsw_graph));
++    log_metric("index_size", "flatnav_graph_overhead_bytes", static_cast<double>(flatnav_graph));
++    log_metric("index_size", "combined_bytes", static_cast<double>(combined));
++
++    // ========================================================
++    // Query phase (full parallelism, same thread count for both)
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Query phase (nq = " << ds.nq << ", k = " << K << ", threads = "
++              << total_threads << ")\n"
++              << "========================================\n";
++    omp_set_num_threads(total_threads);
++    const size_t nk = static_cast<size_t>(ds.nq) * static_cast<size_t>(K);
++
++    std::vector<float> hnsw_distances(nk);
++    std::vector<faiss::idx_t> hnsw_labels(nk);
++    double hnsw_seconds = time_seconds([&]() {
++        hnsw.search(ds.nq, ds.xq, K, hnsw_distances.data(), hnsw_labels.data());
++    });
++    QueryReport hnsw_q = report_query("hnsw", hnsw_seconds, hnsw_labels, K, ds, RECALL_EVAL_K);
++
++    std::vector<float> flatnav_distances(nk);
++    std::vector<faiss::idx_t> flatnav_labels(nk);
++    double flatnav_seconds = time_seconds([&]() {
++        flatnav_faiss::search(
++                *flatnav_index,
++                ds.nq,
++                ds.xq,
++                static_cast<int>(K),
++                FLATNAV_EF_SEARCH,
++                flatnav_distances.data(),
++                flatnav_labels.data(),
++                /*num_threads=*/total_threads);
++    });
++    QueryReport flatnav_q =
++            report_query("flatnav", flatnav_seconds, flatnav_labels, K, ds, RECALL_EVAL_K);
++
++    // ========================================================
++    // Summary
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Summary (same storage)\n"
++              << "========================================\n"
++              << "HNSW    build = " << hnsw_build.seconds << " s, QPS = " << hnsw_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << hnsw_q.recall << "\n"
++              << "FlatNav build = " << flatnav_build.seconds << " s, QPS = " << flatnav_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << flatnav_q.recall << "\n"
++              << "Parallel build wall time = " << parallel_build_wall_seconds << " s\n"
++              << "Total memory (storage x1) = " << to_mb(combined) << " MB\n";
++
++    if (g_log_file.is_open()) {
++        g_log_file.close();
++    }
++    std::cout << "\nDone\n";
++    return 0;
++}
+diff --git a/demos/demo_paired_hnsw_flatnav_separate_storage_parallel.cpp b/demos/demo_paired_hnsw_flatnav_separate_storage_parallel.cpp
+new file mode 100644
+index 00000000..d8032aa5
+--- /dev/null
++++ b/demos/demo_paired_hnsw_flatnav_separate_storage_parallel.cpp
+@@ -0,0 +1,233 @@
++// ============================================================
++// demo_paired_hnsw_flatnav_separate_storage_parallel.cpp
++//
++// HNSW (faiss) + FlatNav built in parallel, each with its OWN copy of
++// the vectors (the baseline for the same-storage demo):
++//
++//   faiss::IndexHNSWFlat  -> own IndexFlatL2 (own_fields = true)
++//   FlatNav (owned)       -> own interleaved [vector][M links][label] nodes
++//
++// Both are filled from the same xb in the same order, so id i is the
++// same vector in both indexes.
++//
++// Each build runs on its own pinned CPU with exactly one thread.
++// FlatNav and faiss are both compiled for AVX2 (no AVX-512); the
++// SIMD configuration is printed and logged at startup.
++//
++// Usage:
++//   demo_paired_hnsw_flatnav_separate_storage_parallel
++//       base.fvecs query.fvecs [gt.ivecs|-] [log.csv]
++//       [HNSW_M=32] [HNSW_efConstruction=100] [HNSW_efSearch=64]
++//       [FLATNAV_M=32] [FLATNAV_efConstruction=100] [FLATNAV_efSearch=64]
++// ============================================================
++
++#include "paired_flatnav_common.hpp"
++
++int main(int argc, char** argv) {
++    if (argc < 3) {
++        std::cerr << "Usage:\n  " << argv[0]
++                  << " base.fvecs query.fvecs [gt.ivecs|-] [log.csv]"
++                  << " [HNSW_M] [HNSW_efC] [HNSW_efS]"
++                  << " [FLATNAV_M] [FLATNAV_efC] [FLATNAV_efS]\n";
++        return 1;
++    }
++    const char* base_file = argv[1];
++    const char* query_file = argv[2];
++    const char* gt_file = (argc >= 4) ? argv[3] : nullptr;
++    const std::string log_path = (argc >= 5) ? argv[4] : "benchmark_log.csv";
++    log_init(log_path);
++
++    // ========================================================
++    // Parameters
++    // ========================================================
++    const int HNSW_M = (argc >= 6) ? stoi(argv[5]) : 32;
++    const int HNSW_EF_CONSTRUCTION = (argc >= 7) ? stoi(argv[6]) : 100;
++    const int HNSW_EF_SEARCH = (argc >= 8) ? stoi(argv[7]) : 64;
++    const int FLATNAV_M = (argc >= 9) ? stoi(argv[8]) : 32;
++    const int FLATNAV_EF_CONSTRUCTION = (argc >= 10) ? stoi(argv[9]) : 100;
++    const int FLATNAV_EF_SEARCH = (argc >= 11) ? stoi(argv[10]) : 64;
++    const faiss::idx_t K = 20;
++    const size_t RECALL_EVAL_K = 20;
++
++    std::cout << "\n========================================\n"
++              << "Paired HNSW + FlatNav Demo (separate storage)\n"
++              << "========================================\n"
++              << "HNSW M                 = " << HNSW_M << "\n"
++              << "HNSW efConstruction    = " << HNSW_EF_CONSTRUCTION << "\n"
++              << "HNSW efSearch          = " << HNSW_EF_SEARCH << "\n"
++              << "FlatNav M              = " << FLATNAV_M << "\n"
++              << "FlatNav efConstruction = " << FLATNAV_EF_CONSTRUCTION << "\n"
++              << "FlatNav efSearch       = " << FLATNAV_EF_SEARCH << "\n";
++    log_metric("params", "hnsw_M", HNSW_M);
++    log_metric("params", "hnsw_ef_construction", HNSW_EF_CONSTRUCTION);
++    log_metric("params", "hnsw_ef_search", HNSW_EF_SEARCH);
++    log_metric("params", "flatnav_M", FLATNAV_M);
++    log_metric("params", "flatnav_ef_construction", FLATNAV_EF_CONSTRUCTION);
++    log_metric("params", "flatnav_ef_search", FLATNAV_EF_SEARCH);
++
++    report_simd_config();
++
++    PairDataset ds;
++    if (!load_pair_dataset(base_file, query_file, gt_file, RECALL_EVAL_K, ds)) {
++        return 1;
++    }
++    const int d = ds.d;
++    const faiss::idx_t n = ds.n;
++
++    // ========================================================
++    // Construct both indexes with SEPARATE, independent storage
++    // ========================================================
++    // IndexHNSWFlat creates and owns its IndexFlatL2 (own_fields = true);
++    // hnsw.add() below fills it and builds the graph, as stock faiss does.
++    faiss::IndexHNSWFlat hnsw(d, HNSW_M, faiss::METRIC_L2);
++    hnsw.hnsw.efConstruction = HNSW_EF_CONSTRUCTION;
++    hnsw.hnsw.efSearch = HNSW_EF_SEARCH;
++    PAIR_CHECK(hnsw.own_fields);
++
++    // Regular FlatNav index: copies the vectors into its own node blocks.
++    auto flatnav_index = flatnav_faiss::make_flatnav_l2_owned(d, static_cast<size_t>(n), FLATNAV_M);
++    PAIR_CHECK(!flatnav_index->usesExternalStorage());
++
++    // ========================================================
++    // Build both graphs in parallel, one pinned thread each
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Building HNSW + FlatNav in parallel (separate storage)\n"
++              << "========================================\n";
++    const int total_threads = available_cpu_count();
++    const std::pair<int, int> build_cpus = pick_two_cpus();
++    const int cpu_for_hnsw = build_cpus.first;
++    const int cpu_for_flatnav = build_cpus.second;
++    std::cout << "HNSW thread -> CPU " << cpu_for_hnsw << ", FlatNav thread -> CPU "
++              << cpu_for_flatnav << "\n";
++
++    PinnedBuild hnsw_build, flatnav_build;
++    double parallel_build_wall_seconds = time_seconds([&]() {
++        std::thread hnsw_thread = start_pinned_build(cpu_for_hnsw, hnsw_build, [&]() {
++            // Standard API: fills hnsw's own storage AND builds the graph.
++            hnsw.add(n, ds.xb);
++        });
++        std::thread flatnav_thread = start_pinned_build(cpu_for_flatnav, flatnav_build, [&]() {
++            // Copies xb into FlatNav's own memory and builds the graph.
++            flatnav_faiss::build_owned(
++                    *flatnav_index, ds.xb, static_cast<size_t>(n), FLATNAV_EF_CONSTRUCTION,
++                    /*num_threads=*/1);
++        });
++        hnsw_thread.join();
++        flatnav_thread.join();
++    });
++
++    std::cout << "HNSW    build: " << hnsw_build.seconds << " sec on CPU " << hnsw_build.ran_on_cpu
++              << " (pinned to " << hnsw_build.requested_cpu << "), ntotal = " << hnsw.ntotal << "\n"
++              << "FlatNav build: " << flatnav_build.seconds << " sec on CPU "
++              << flatnav_build.ran_on_cpu << " (pinned to " << flatnav_build.requested_cpu
++              << "), nodes = " << flatnav_index->currentNumNodes() << "\n"
++              << "Combined wall-clock time = " << parallel_build_wall_seconds << " sec (vs. "
++              << (hnsw_build.seconds + flatnav_build.seconds) << " sec if run sequentially)\n";
++    log_metric("construction", "hnsw_build_seconds", hnsw_build.seconds);
++    log_metric("construction", "flatnav_build_seconds", flatnav_build.seconds);
++    log_metric("construction", "parallel_build_wall_seconds", parallel_build_wall_seconds);
++
++    // ========================================================
++    // Verify the storage really is separate
++    // ========================================================
++    const auto* hnsw_flat = dynamic_cast<const faiss::IndexFlat*>(hnsw.storage);
++    PAIR_CHECK(hnsw_flat != nullptr);
++    std::cout << "\n========================================\n"
++              << "Verifying independent vector storage\n"
++              << "========================================\n"
++              << "hnsw.storage                = " << static_cast<const void*>(hnsw.storage) << "\n"
++              << "hnsw.storage->get_xb()      = " << static_cast<const void*>(hnsw_flat->get_xb())
++              << "\n"
++              << "FlatNav                     = owns its vectors ("
++              << flatnav_index->nodeSizeBytes() << " B/node incl. "
++              << flatnav_index->dataSizeBytes() << " B vector)\n";
++    PAIR_CHECK(hnsw.own_fields);
++    PAIR_CHECK(hnsw.storage->ntotal == n);
++    PAIR_CHECK(hnsw.ntotal == n);
++    PAIR_CHECK(!flatnav_index->usesExternalStorage());
++    PAIR_CHECK(flatnav_index->externalStorageData() == nullptr);
++    PAIR_CHECK(flatnav_index->currentNumNodes() == static_cast<size_t>(n));
++    std::cout << "\nSUCCESS: HNSW and FlatNav were built in parallel, each on its own "
++              << "separate, independent vector storage.\n";
++
++    // ========================================================
++    // Index sizes (storage_bytes = both vector copies)
++    // ========================================================
++    const size_t hnsw_storage_bytes = flat_storage_bytes_direct(*hnsw_flat);
++    const size_t flatnav_vector_bytes = flatnav_faiss::vector_bytes(*flatnav_index);
++    const size_t storage_bytes = hnsw_storage_bytes + flatnav_vector_bytes;
++    const size_t hnsw_graph = hnsw_graph_bytes_direct(hnsw.hnsw);
++    const size_t flatnav_graph = flatnav_faiss::graph_overhead_bytes(*flatnav_index);
++    const size_t combined = storage_bytes + hnsw_graph + flatnav_graph;
++    const size_t if_shared = hnsw_storage_bytes + hnsw_graph + flatnav_graph;
++    std::cout << "\n========================================\n"
++              << "Index size breakdown\n"
++              << "========================================\n"
++              << "  HNSW vector storage     : " << to_mb(hnsw_storage_bytes) << " MB\n"
++              << "  FlatNav vector copy     : " << to_mb(flatnav_vector_bytes) << " MB\n"
++              << "  HNSW graph overhead     : " << to_mb(hnsw_graph) << " MB\n"
++              << "  FlatNav graph overhead  : " << to_mb(flatnav_graph) << " MB\n"
++              << "  Combined (storage x2)   : " << to_mb(combined) << " MB\n"
++              << "  If shared               : " << to_mb(if_shared) << " MB (would save "
++              << to_mb(combined - if_shared) << " MB)\n"
++              << "  Current RSS             : " << to_mb(get_current_rss_bytes()) << " MB\n";
++    log_metric("index_size", "storage_bytes", static_cast<double>(storage_bytes));
++    log_metric("index_size", "hnsw_storage_bytes", static_cast<double>(hnsw_storage_bytes));
++    log_metric("index_size", "flatnav_vector_bytes", static_cast<double>(flatnav_vector_bytes));
++    log_metric("index_size", "hnsw_graph_overhead_bytes", static_cast<double>(hnsw_graph));
++    log_metric("index_size", "flatnav_graph_overhead_bytes", static_cast<double>(flatnav_graph));
++    log_metric("index_size", "combined_bytes", static_cast<double>(combined));
++
++    // ========================================================
++    // Query phase (full parallelism, same thread count for both)
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Query phase (nq = " << ds.nq << ", k = " << K << ", threads = "
++              << total_threads << ")\n"
++              << "========================================\n";
++    omp_set_num_threads(total_threads);
++    const size_t nk = static_cast<size_t>(ds.nq) * static_cast<size_t>(K);
++
++    std::vector<float> hnsw_distances(nk);
++    std::vector<faiss::idx_t> hnsw_labels(nk);
++    double hnsw_seconds = time_seconds([&]() {
++        hnsw.search(ds.nq, ds.xq, K, hnsw_distances.data(), hnsw_labels.data());
++    });
++    QueryReport hnsw_q = report_query("hnsw", hnsw_seconds, hnsw_labels, K, ds, RECALL_EVAL_K);
++
++    std::vector<float> flatnav_distances(nk);
++    std::vector<faiss::idx_t> flatnav_labels(nk);
++    double flatnav_seconds = time_seconds([&]() {
++        flatnav_faiss::search(
++                *flatnav_index,
++                ds.nq,
++                ds.xq,
++                static_cast<int>(K),
++                FLATNAV_EF_SEARCH,
++                flatnav_distances.data(),
++                flatnav_labels.data(),
++                /*num_threads=*/total_threads);
++    });
++    QueryReport flatnav_q =
++            report_query("flatnav", flatnav_seconds, flatnav_labels, K, ds, RECALL_EVAL_K);
++
++    // ========================================================
++    // Summary
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Summary (separate storage)\n"
++              << "========================================\n"
++              << "HNSW    build = " << hnsw_build.seconds << " s, QPS = " << hnsw_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << hnsw_q.recall << "\n"
++              << "FlatNav build = " << flatnav_build.seconds << " s, QPS = " << flatnav_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << flatnav_q.recall << "\n"
++              << "Parallel build wall time = " << parallel_build_wall_seconds << " s\n"
++              << "Total memory (storage x2) = " << to_mb(combined) << " MB\n";
++
++    if (g_log_file.is_open()) {
++        g_log_file.close();
++    }
++    std::cout << "\nDone\n";
++    return 0;
++}
+diff --git a/demos/demo_paired_hnsw_nsg_flatnav_same_storage_parallel.cpp b/demos/demo_paired_hnsw_nsg_flatnav_same_storage_parallel.cpp
+new file mode 100644
+index 00000000..489c86f1
+--- /dev/null
++++ b/demos/demo_paired_hnsw_nsg_flatnav_same_storage_parallel.cpp
+@@ -0,0 +1,2109 @@
++// ============================================================
++// demo_paired_hnsw_nsg_flatnav_same_storage_parallel.cpp
++//
++// Same as demo_paired_hnsw_nsg_same_storage_parallal.cpp, plus a third
++// index: a FlatNav graph that reads its vectors from the SAME
++// faiss::IndexFlatL2 (shared_storage). All three graphs are built in
++// parallel, one pinned thread each, and no vector is ever duplicated.
++//
++// Extra (optional) arguments after the original ones:
++//   argv[10] FlatNav M                (default 32)
++//   argv[11] FlatNav ef_construction  (default 100)
++//   argv[12] FlatNav ef_search        (default 64)
++// ============================================================
++#include <faiss/IndexFlat.h>
++#include <faiss/IndexHNSW.h>
++#include <faiss/IndexNSG.h>
++#include "index_size_reporting.hpp"
++#include "flatnav_faiss_storage.hpp"
++
++#include <faiss/impl/AuxIndexStructures.h>
++#include <faiss/impl/DistanceComputer.h>
++#include <faiss/impl/HNSW.h>
++#include <faiss/impl/NSG.h>
++#include <faiss/impl/VisitedTable.h>
++#include <faiss/utils/random.h>
++#include <faiss/utils/utils.h>
++
++#include <omp.h>
++#include <algorithm>
++#include <cassert>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <fstream>
++#include <iostream>
++#include <memory>
++#include <string>
++#include <thread>
++#include <unordered_set>
++#include <vector>
++
++#include <pthread.h>
++#include <sched.h>
++#include <sys/stat.h>
++ using namespace std;
++
++// ============================================================
++// Simple timing log
++//
++// Appends one CSV row per metric to a log file, in addition
++// to whatever gets printed to stdout. Flushed after every
++// write so the log is intact even if the run is interrupted
++// partway through (e.g. during a long NSG build on a big
++// dataset).
++//
++// Columns: run_timestamp, phase, metric, value
++// ============================================================
++
++std::ofstream g_log_file;
++std::string g_run_timestamp;
++
++void log_init(const std::string& path) {
++
++    g_log_file.open(
++            path,
++            std::ios::out |
++                    std::ios::app);
++
++    if (!g_log_file.is_open()) {
++
++        fprintf(
++                stderr,
++                "Warning: could not open log file '%s' — "
++                "continuing without file logging.\n",
++                path.c_str());
++
++        return;
++    }
++
++    std::time_t now =
++            std::time(nullptr);
++
++    char buf[32];
++
++    std::strftime(
++            buf,
++            sizeof(buf),
++            "%Y-%m-%dT%H:%M:%S",
++            std::localtime(&now));
++
++    g_run_timestamp =
++            std::string(buf);
++
++    // Write header only if the file is new/empty.
++    g_log_file.seekp(
++            0,
++            std::ios::end);
++
++    if (g_log_file.tellp() == 0) {
++        g_log_file
++                << "run_timestamp,phase,metric,value\n";
++    }
++
++    g_log_file.flush();
++
++    std::cout
++            << "Logging timings to: "
++            << path
++            << "\n";
++}
++
++void log_metric(
++        const std::string& phase,
++        const std::string& metric,
++        double value) {
++
++    // Always print to console.
++    std::cout
++            << "[LOG] "
++            << phase
++            << " | "
++            << metric
++            << " = "
++            << value
++            << "\n";
++
++    if (!g_log_file.is_open()) {
++        return;
++    }
++
++    g_log_file
++            << g_run_timestamp
++            << ","
++            << phase
++            << ","
++            << metric
++            << ","
++            << value
++            << "\n";
++
++    g_log_file.flush();
++}
++
++
++// ============================================================
++// Read .fvecs file
++//
++// Format:
++//
++// int32 dimension
++// float[d] vector
++// int32 dimension
++// float[d] vector
++// ...
++//
++// Returns a contiguous float array:
++//
++//     [n][d]
++//
++// Caller owns returned memory.
++// ============================================================
++
++float* fvecs_read(
++        const char* fname,
++        size_t* d_out,
++        size_t* n_out) {
++
++    FILE* f = fopen(fname, "rb");
++
++    if (!f) {
++        fprintf(
++                stderr,
++                "Could not open file: %s\n",
++                fname);
++
++        perror("");
++
++        std::abort();
++    }
++
++    int d = 0;
++
++    size_t read_count =
++            fread(
++                    &d,
++                    sizeof(int),
++                    1,
++                    f);
++
++    if (read_count != 1) {
++        fprintf(
++                stderr,
++                "Could not read dimension from %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    assert(
++            d > 0 &&
++            d < 1000000);
++
++    // --------------------------------------------------------
++    // Determine file size
++    // --------------------------------------------------------
++
++    fseek(
++            f,
++            0,
++            SEEK_END);
++
++    long file_size =
++            ftell(f);
++
++    fseek(
++            f,
++            0,
++            SEEK_SET);
++
++    const size_t vector_size_bytes =
++            sizeof(int) +
++            static_cast<size_t>(d) *
++                    sizeof(float);
++
++    if (
++            file_size <= 0 ||
++            static_cast<size_t>(file_size) %
++                            vector_size_bytes !=
++                    0) {
++
++        fprintf(
++                stderr,
++                "Invalid fvecs file size for %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    size_t n =
++            static_cast<size_t>(file_size) /
++            vector_size_bytes;
++
++    printf(
++            "Reading %s\n",
++            fname);
++
++    printf(
++            "  vectors   = %zu\n"
++            "  dimension = %d\n",
++            n,
++            d);
++
++    // --------------------------------------------------------
++    // Allocate output
++    // --------------------------------------------------------
++
++    float* data =
++            new float[
++                    n *
++                    static_cast<size_t>(d)];
++
++    // --------------------------------------------------------
++    // Read vectors
++    // --------------------------------------------------------
++
++    for (size_t i = 0; i < n; ++i) {
++
++        int current_d = 0;
++
++        if (
++                fread(
++                        &current_d,
++                        sizeof(int),
++                        1,
++                        f) !=
++                1) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading dimension at vector %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (current_d != d) {
++
++            fprintf(
++                    stderr,
++                    "Dimension mismatch at vector %zu: "
++                    "expected %d but found %d\n",
++                    i,
++                    d,
++                    current_d);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (
++                fread(
++                        data +
++                                i *
++                                        static_cast<size_t>(d),
++                        sizeof(float),
++                        d,
++                        f) !=
++                static_cast<size_t>(d)) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading vector %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++    }
++
++    fclose(f);
++
++    *d_out =
++            static_cast<size_t>(d);
++
++    *n_out =
++            n;
++
++    return data;
++}
++
++
++// ============================================================
++// Read .ivecs file (ground truth neighbor ids)
++//
++// Same on-disk layout as .fvecs, but the payload per row is
++// int32 instead of float32:
++//
++// int32 k
++// int32[k] neighbor ids
++// int32 k
++// int32[k] neighbor ids
++// ...
++//
++// Returns a contiguous int64 (idx_t) array:
++//
++//     [nq][k]
++//
++// Caller owns returned memory.
++// ============================================================
++
++faiss::idx_t* ivecs_read(
++        const char* fname,
++        size_t* k_out,
++        size_t* nq_out) {
++
++    FILE* f = fopen(fname, "rb");
++
++    if (!f) {
++        fprintf(
++                stderr,
++                "Could not open file: %s\n",
++                fname);
++
++        perror("");
++
++        std::abort();
++    }
++
++    int k = 0;
++
++    if (
++            fread(
++                    &k,
++                    sizeof(int),
++                    1,
++                    f) !=
++            1) {
++
++        fprintf(
++                stderr,
++                "Could not read k from %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    assert(
++            k > 0 &&
++            k < 1000000);
++
++    fseek(
++            f,
++            0,
++            SEEK_END);
++
++    long file_size =
++            ftell(f);
++
++    fseek(
++            f,
++            0,
++            SEEK_SET);
++
++    const size_t row_size_bytes =
++            sizeof(int) +
++            static_cast<size_t>(k) *
++                    sizeof(int);
++
++    if (
++            file_size <= 0 ||
++            static_cast<size_t>(file_size) %
++                            row_size_bytes !=
++                    0) {
++
++        fprintf(
++                stderr,
++                "Invalid ivecs file size for %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    size_t nq =
++            static_cast<size_t>(file_size) /
++            row_size_bytes;
++
++    printf(
++            "Reading %s\n",
++            fname);
++
++    printf(
++            "  queries with GT = %zu\n"
++            "  k (GT depth)    = %d\n",
++            nq,
++            k);
++
++    faiss::idx_t* data =
++            new faiss::idx_t[
++                    nq *
++                    static_cast<size_t>(k)];
++
++    std::vector<int> row_buf(
++            static_cast<size_t>(k));
++
++    for (size_t i = 0; i < nq; ++i) {
++
++        int current_k = 0;
++
++        if (
++                fread(
++                        &current_k,
++                        sizeof(int),
++                        1,
++                        f) !=
++                1) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading k at row %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (current_k != k) {
++
++            fprintf(
++                    stderr,
++                    "k mismatch at row %zu: "
++                    "expected %d but found %d\n",
++                    i,
++                    k,
++                    current_k);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (
++                fread(
++                        row_buf.data(),
++                        sizeof(int),
++                        k,
++                        f) !=
++                static_cast<size_t>(k)) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading row %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        for (int j = 0; j < k; ++j) {
++            data[i * static_cast<size_t>(k) + j] =
++                    static_cast<faiss::idx_t>(
++                            row_buf[j]);
++        }
++    }
++
++    fclose(f);
++
++    *k_out =
++            static_cast<size_t>(k);
++
++    *nq_out =
++            nq;
++
++    return data;
++}
++
++
++// ============================================================
++// Recall@k helper
++//
++// For each query, count how many of the top-`eval_k` returned
++// ids appear in the ground truth's top-`eval_k` ids.
++//
++// Returns fraction in [0, 1].
++// ============================================================
++
++double compute_recall_at_k(
++        const std::vector<faiss::idx_t>& result_labels,
++        faiss::idx_t search_k,
++        const faiss::idx_t* gt,
++        size_t gt_k,
++        size_t nq,
++        size_t eval_k) {
++
++    assert(eval_k <= static_cast<size_t>(search_k));
++    assert(eval_k <= gt_k);
++
++    size_t total_correct = 0;
++    size_t total_expected = 0;
++
++    for (size_t q = 0; q < nq; ++q) {
++
++        std::unordered_set<faiss::idx_t> truth(
++                gt + q * gt_k,
++                gt + q * gt_k + eval_k);
++
++        for (size_t j = 0; j < eval_k; ++j) {
++
++            faiss::idx_t got =
++                    result_labels[
++                            q * static_cast<size_t>(search_k) +
++                            j];
++
++            if (truth.count(got)) {
++                ++total_correct;
++            }
++        }
++
++        total_expected += eval_k;
++    }
++
++    return static_cast<double>(total_correct) /
++            static_cast<double>(total_expected);
++}
++
++
++// ============================================================
++// available_cpu_count
++//
++// std::thread::hardware_concurrency() reports the machine's
++// TOTAL core count and does NOT shrink under a taskset/cgroup
++// CPU affinity restriction (verified empirically: running under
++// `taskset -c 0` on a 2-core box still reports 2, not 1). Using
++// it to size internal OpenMP thread pools means that under
++// `taskset -c 1-2` (2 CPUs) on, say, a 32-core machine, each of
++// the 2 build threads below would try to spawn ~16 OpenMP
++// workers — 32 threads fighting over 2 pinned cores instead of
++// 2 threads cleanly occupying 2 cores.
++//
++// sched_getaffinity() reports the process's actual current CPU
++// affinity mask, which DOES reflect taskset/cgroup restrictions
++// (also verified: `taskset -c 0` correctly yields a mask of 1).
++// This is what should drive how many threads we ask for.
++// ============================================================
++
++int available_cpu_count() {
++    cpu_set_t set;
++    CPU_ZERO(&set);
++
++    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
++        int count = CPU_COUNT(&set);
++        if (count > 0) {
++            return count;
++        }
++    }
++
++    // Fallback (e.g. non-Linux, or the syscall failed): total
++    // core count is still better than hardcoding 1.
++    return std::max(
++            1,
++            static_cast<int>(
++                    std::thread::hardware_concurrency()));
++}
++
++
++// ============================================================
++// affinity_cpu_list / pin_thread_to_cpu
++//
++// affinity_cpu_list() returns the actual CPU ids this process is
++// currently allowed to run on (respects taskset/cgroups — same
++// mask available_cpu_count() reads, just returned as a list of
++// ids instead of a count).
++//
++// pin_thread_to_cpu() pins a std::thread to exactly one CPU id
++// via pthread_setaffinity_np (Linux). This is what gives a hard
++// guarantee — independent of the OS scheduler's whims — that
++// the HNSW build thread and the NSG build thread each run on
++// their own dedicated core and never get scheduled onto the
++// same one (when at least 2 CPUs are available).
++// ============================================================
++
++std::vector<int> affinity_cpu_list() {
++    std::vector<int> cpus;
++
++    cpu_set_t set;
++    CPU_ZERO(&set);
++
++    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
++        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
++            if (CPU_ISSET(cpu, &set)) {
++                cpus.push_back(cpu);
++            }
++        }
++    }
++
++    if (cpus.empty()) {
++        // Fallback: assume CPUs 0..N-1 are usable.
++        int n = std::max(
++                1,
++                static_cast<int>(
++                        std::thread::hardware_concurrency()));
++        for (int cpu = 0; cpu < n; cpu++) {
++            cpus.push_back(cpu);
++        }
++    }
++
++    return cpus;
++}
++
++void pin_thread_to_cpu(std::thread& t, int cpu_id) {
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    CPU_SET(cpu_id, &set);
++
++    int rc = pthread_setaffinity_np(
++            t.native_handle(),
++            sizeof(set),
++            &set);
++
++    if (rc != 0) {
++        fprintf(
++                stderr,
++                "Warning: pthread_setaffinity_np(cpu=%d) failed "
++                "(rc=%d) — thread will run unpinned.\n",
++                cpu_id,
++                rc);
++    }
++}
++
++
++// ============================================================
++// build_hnsw_graph_on_shared_storage
++//
++// A faithful, from-scratch port of faiss's internal
++// `hnsw_add_vertices` (IndexHNSW.cpp), which is normally only
++// reachable via IndexHNSW::add() and cannot be called directly
++// from outside faiss because it lives in an anonymous
++// namespace. It is reconstructed here using ONLY public HNSW /
++// IndexHNSW members (hnsw.prepare_level_tab, hnsw.levels,
++// hnsw.add_with_locks, index_hnsw.locks, index_hnsw.storage,
++// etc. — all verified public in faiss/impl/HNSW.h and
++// faiss/IndexHNSW.h).
++//
++// Why this exists at all: IndexHNSW::add() always calls
++// storage->add(n, x) itself as its first step, so it cannot be
++// pointed at storage that has already been populated by someone
++// else (here, by us, once, up front) without adding the vectors
++// a second time. This function skips that step and only builds
++// the graph structure against storage that the CALLER has
++// already populated — which is exactly what lets HNSW and NSG
++// build their graphs concurrently on one shared IndexFlat with
++// zero vector duplication, ever.
++//
++// Precondition: index_hnsw.storage already contains exactly the
++// n vectors in x (ids 0..n-1), and this is a from-scratch build
++// (no pre-existing graph — n0 is fixed at 0 below).
++// ============================================================
++
++void build_hnsw_graph_on_shared_storage(
++        faiss::IndexHNSW& index_hnsw,
++        size_t n,
++        const float* x,
++        bool verbose) {
++
++    using storage_idx_t = faiss::HNSW::storage_idx_t;
++
++    if (n == 0) {
++        return;
++    }
++
++    const size_t n0 = 0; // from-scratch build only
++    const size_t d = static_cast<size_t>(index_hnsw.d);
++    faiss::HNSW& hnsw = index_hnsw.hnsw;
++    const size_t ntotal = n0 + n;
++
++    int max_level =
++            hnsw.prepare_level_tab(
++                    n,
++                    /*preset_levels=*/false);
++
++    if (verbose) {
++        printf("build_hnsw_graph_on_shared_storage: max_level = %d\n",
++               max_level);
++    }
++
++    auto& locks = index_hnsw.locks;
++    locks.prepare(ntotal);
++
++    // Bucket points by level, highest first — identical logic to
++    // faiss's internal hnsw_add_vertices.
++    std::vector<int> hist;
++    std::vector<int> order(n);
++
++    {
++        for (size_t i = 0; i < n; i++) {
++            storage_idx_t pt_id = static_cast<storage_idx_t>(i + n0);
++            int pt_level = hnsw.levels[pt_id] - 1;
++            while (pt_level >= static_cast<int>(hist.size())) {
++                hist.push_back(0);
++            }
++            hist[pt_level]++;
++        }
++
++        std::vector<int> offsets(hist.size() + 1, 0);
++        for (size_t i = 0; i + 1 < hist.size(); i++) {
++            offsets[i + 1] = offsets[i] + hist[i];
++        }
++
++        for (size_t i = 0; i < n; i++) {
++            storage_idx_t pt_id = static_cast<storage_idx_t>(i + n0);
++            int pt_level = hnsw.levels[pt_id] - 1;
++            order[offsets[pt_level]++] = pt_id;
++        }
++    }
++
++    size_t check_period =
++            faiss::InterruptCallback::get_period_hint(
++                    static_cast<size_t>(max_level) *
++                    d *
++                    static_cast<size_t>(hnsw.efConstruction));
++
++    faiss::RandomGenerator rng2(789);
++
++    size_t i1 = n;
++
++    for (int pt_level = static_cast<int>(hist.size()) - 1;
++         pt_level >= static_cast<int>(!index_hnsw.init_level0);
++         pt_level--) {
++
++        size_t i0 = i1 - hist[pt_level];
++
++        // Random permutation within this level's bucket, to remove
++        // dataset-order bias — same as the internal implementation.
++        for (size_t j = i0; j < i1; j++) {
++            std::swap(
++                    order[j],
++                    order[j + rng2.rand_int(static_cast<int>(i1 - j))]);
++        }
++
++        bool interrupt = false;
++
++#pragma omp parallel if (i1 > i0 + 100)
++        {
++            std::unique_ptr<faiss::VisitedTable> vt =
++                    faiss::VisitedTable::create(
++                            ntotal,
++                            hnsw.use_visited_hashset);
++
++            // storage_distance_computer() in faiss is just this one-liner,
++            // but it's a private helper (anonymous namespace), so it's
++            // inlined here directly — same call, same effect.
++            std::unique_ptr<faiss::DistanceComputer> dis(
++                    index_hnsw.storage->get_distance_computer());
++
++            size_t counter = 0;
++
++#pragma omp for schedule(static)
++            for (int64_t i = static_cast<int64_t>(i0);
++                 i < static_cast<int64_t>(i1);
++                 i++) {
++
++                storage_idx_t pt_id = order[i];
++                dis->set_query(x + (pt_id - n0) * d);
++
++                if (interrupt) {
++                    continue;
++                }
++
++                hnsw.add_with_locks(
++                        *dis,
++                        pt_level,
++                        pt_id,
++                        locks,
++                        *vt,
++                        index_hnsw.keep_max_size_level0 &&
++                                (pt_level == 0));
++
++                if (counter % check_period == 0) {
++                    if (faiss::InterruptCallback::is_interrupted()) {
++                        interrupt = true;
++                    }
++                }
++                counter++;
++            }
++        }
++
++        if (interrupt) {
++            fprintf(stderr, "HNSW build interrupted\n");
++            std::abort();
++        }
++
++        i1 = i0;
++    }
++
++    if (!index_hnsw.retain_locks) {
++        locks.clear();
++    }
++
++    // IndexHNSW::add() normally sets this from storage->ntotal after
++    // calling storage->add(); we set it directly since storage was
++    // already populated by the caller before this function ran.
++    index_hnsw.ntotal = static_cast<faiss::idx_t>(ntotal);
++}
++
++
++// ============================================================
++// build_nsg_graph_on_shared_storage
++//
++// A faithful port of the build_type == 0 (brute-force kNN
++// graph) branch of IndexNSG::add() (IndexNSG.cpp), skipping the
++// storage->add(n, x) call that branch normally makes first —
++// again, so this can run against storage the caller already
++// populated, shared with another index being built concurrently.
++//
++// Only the brute-force path (build_type == 0) is ported; NSG's
++// build_type == 1 (NNDescent) path is not needed for this demo.
++//
++// Precondition: same as build_hnsw_graph_on_shared_storage — the
++// n vectors in x are already present in index_nsg.storage as ids
++// 0..n-1, and this is a from-scratch build.
++// ============================================================
++
++void build_nsg_graph_on_shared_storage(
++        faiss::IndexNSG& index_nsg,
++        size_t n,
++        const float* x,
++        bool verbose) {
++
++    faiss::Index* storage = index_nsg.storage;
++    const int GK = index_nsg.GK;
++    const faiss::idx_t n_idx = static_cast<faiss::idx_t>(n);
++
++    if (verbose) {
++        printf("build_nsg_graph_on_shared_storage: brute-force kNN, GK=%d\n",
++               GK);
++    }
++
++    // storage->assign() is a plain read-only nearest-neighbor query — safe
++    // to run concurrently against a fully-populated, read-only IndexFlat
++    // while another thread is doing the same (or reading via
++    // get_distance_computer()) for HNSW.
++    std::vector<faiss::idx_t> knng(
++            static_cast<size_t>(n) * (GK + 1));
++
++    storage->assign(n_idx, x, knng.data(), GK + 1);
++
++    std::vector<faiss::idx_t> knng_trimmed(
++            static_cast<size_t>(n) * GK);
++
++    // Remove each point from its own neighbor list — identical logic to
++    // IndexNSG::add().
++    if (storage->metric_type == faiss::METRIC_INNER_PRODUCT) {
++        for (faiss::idx_t i = 0; i < n_idx; i++) {
++            int count = 0;
++            for (int j = 0; j < GK + 1; j++) {
++                faiss::idx_t id = knng[i * (GK + 1) + j];
++                if (id != i) {
++                    knng_trimmed[i * GK + count] = id;
++                    count += 1;
++                }
++                if (count == GK) {
++                    break;
++                }
++            }
++        }
++    } else {
++        for (faiss::idx_t i = 0; i < n_idx; i++) {
++            memmove(
++                    knng_trimmed.data() + i * GK,
++                    knng.data() + i * (GK + 1) + 1,
++                    static_cast<size_t>(GK) * sizeof(faiss::idx_t));
++        }
++    }
++
++    index_nsg.check_knn_graph(knng_trimmed.data(), n_idx, GK);
++
++    const faiss::nsg::Graph<faiss::idx_t> knn_graph(
++            knng_trimmed.data(),
++            static_cast<int>(n),
++            GK);
++
++    // The actual graph-construction step — public API, read-only against
++    // storage (only reads distances/vectors, never mutates it).
++    index_nsg.nsg.build(storage, n_idx, knn_graph, verbose);
++
++    index_nsg.ntotal = n_idx;
++    index_nsg.is_built = true;
++}
++
++
++// ============================================================
++// Main
++//
++// Usage:
++//
++// ./demo_paired_hnsw_nsg \
++//     /path/to/base.fvecs \
++//     /path/to/query.fvecs \
++//     [/path/to/groundtruth.ivecs] \
++//     [/path/to/log.csv]
++//
++// Example (SIFT1M):
++//
++// ./build/demos/demo_paired_hnsw_nsg \
++//     /home/cc/datasets/sift/base.fvecs \
++//     /home/cc/datasets/sift/query.fvecs \
++//     /home/cc/datasets/sift/groundtruth.ivecs \
++//     /home/cc/results/sift_paired_run.csv
++// ============================================================
++
++int main(
++        int argc,
++        char** argv) {
++
++    if (argc < 3) {
++
++        std::cerr
++                << "Usage:\n"
++                << "  "
++                << argv[0]
++                << " /path/to/base.fvecs"
++                << " /path/to/query.fvecs"
++                << " [/path/to/groundtruth.ivecs]"
++                << " [/path/to/log.csv]\n";
++
++        return 1;
++    }
++
++    const char* base_file =
++            argv[1];
++
++    const char* query_file =
++            argv[2];
++
++    const char* gt_file =
++            (argc >= 4) ? argv[3] : nullptr;
++
++    const std::string log_path =
++            (argc >= 5) ? argv[4] : "benchmark_log.csv";
++
++    log_init(log_path);
++
++
++    // ========================================================
++    // Parameters
++    // ========================================================
++
++    const int HNSW_M =
++            (argc >=6) ? stoi(argv[5]) : 32;
++
++    const int HNSW_EF_CONSTRUCTION =
++            (argc >=7) ? stoi(argv[6]) : 100;
++
++    const int HNSW_EF_SEARCH =
++            (argc >=8) ? stoi(argv[7]) : 64;
++
++    const int NSG_R =
++            (argc >=9) ? stoi(argv[8]) : 32;
++
++    const int NSG_GK =
++            64;
++
++    const int NSG_SEARCH_L =
++            (argc >=10) ? stoi(argv[9]) : 64;
++
++    const faiss::idx_t K =
++            20;
++
++    const size_t RECALL_EVAL_K =
++            20;
++
++
++    std::cout
++            << "\n========================================\n"
++            << "Paired HNSW + NSG Demo\n"
++            << "========================================\n";
++
++    std::cout
++            << "HNSW M              = "
++            << HNSW_M
++            << "\n";
++
++    std::cout
++            << "HNSW efConstruction = "
++            << HNSW_EF_CONSTRUCTION
++            << "\n";
++
++    std::cout
++            << "HNSW efSearch       = "
++            << HNSW_EF_SEARCH
++            << "\n";
++
++    std::cout
++            << "NSG R                = "
++            << NSG_R
++            << "\n";
++
++    std::cout
++            << "NSG GK               = "
++            << NSG_GK
++            << "\n";
++
++    std::cout
++            << "NSG search_L         = "
++            << NSG_SEARCH_L
++            << "\n\n";
++
++
++    // ========================================================
++    // Load base dataset
++    // ========================================================
++
++    size_t d_size =
++            0;
++
++    size_t nb =
++            0;
++
++    float* xb =
++            fvecs_read(
++                    base_file,
++                    &d_size,
++                    &nb);
++
++    const int d =
++            static_cast<int>(
++                    d_size);
++
++    const faiss::idx_t n =
++            static_cast<faiss::idx_t>(
++                    nb);
++
++
++    std::cout
++            << "\nBase dataset loaded\n";
++
++    std::cout
++            << "d      = "
++            << d
++            << "\n";
++
++    std::cout
++            << "nb     = "
++            << nb
++            << "\n";
++
++
++    // ========================================================
++    // Load query dataset
++    // ========================================================
++
++    size_t qd_size =
++            0;
++
++    size_t nq_size =
++            0;
++
++    float* xq =
++            fvecs_read(
++                    query_file,
++                    &qd_size,
++                    &nq_size);
++
++    if (
++            static_cast<int>(qd_size) !=
++            d) {
++
++        fprintf(
++                stderr,
++                "Query dimension (%zu) does not match "
++                "base dimension (%d)\n",
++                qd_size,
++                d);
++
++        delete[] xb;
++        delete[] xq;
++
++        return 1;
++    }
++
++    const faiss::idx_t nq =
++            static_cast<faiss::idx_t>(
++                    nq_size);
++
++    std::cout
++            << "\nQuery dataset loaded\n";
++
++    std::cout
++            << "nq     = "
++            << nq
++            << "\n";
++
++
++    // ========================================================
++    // Load ground truth (optional)
++    // ========================================================
++
++    faiss::idx_t* gt =
++            nullptr;
++
++    size_t gt_k =
++            0;
++
++    size_t gt_nq =
++            0;
++
++    if (gt_file != nullptr) {
++
++        gt =
++                ivecs_read(
++                        gt_file,
++                        &gt_k,
++                        &gt_nq);
++
++        if (gt_nq != nq_size) {
++
++            fprintf(
++                    stderr,
++                    "Ground truth query count (%zu) does not "
++                    "match query file count (%zu)\n",
++                    gt_nq,
++                    nq_size);
++
++            delete[] xb;
++            delete[] xq;
++            delete[] gt;
++
++            return 1;
++        }
++
++        if (gt_k < RECALL_EVAL_K) {
++
++            fprintf(
++                    stderr,
++                    "Ground truth depth (%zu) is smaller than "
++                    "RECALL_EVAL_K (%zu)\n",
++                    gt_k,
++                    RECALL_EVAL_K);
++
++            delete[] xb;
++            delete[] xq;
++            delete[] gt;
++
++            return 1;
++        }
++    } else {
++
++        std::cout
++                << "\nNo ground truth file provided — "
++                << "recall will not be computed.\n";
++    }
++
++
++    // ========================================================
++    // Populate ONE shared storage, once
++    //
++    // This is the whole point: a single IndexFlatL2 is filled
++    // with the base vectors exactly once, up front. Neither
++    // index will ever call storage->add() itself — both build
++    // functions below only read from `shared_storage`
++    // (distance computations / assign()), so it is safe for
++    // them to do so concurrently once this populate step is
++    // done. No vector is ever duplicated, not even temporarily.
++    // ========================================================
++
++    std::cout
++            << "\n========================================\n"
++            << "Populating shared storage\n"
++            << "========================================\n";
++
++    faiss::IndexFlatL2 shared_storage(d);
++
++    shared_storage.add(n, xb);
++
++    std::cout
++            << "shared_storage.ntotal = "
++            << shared_storage.ntotal
++            << "\n";
++
++
++    // ========================================================
++    // Construct HNSW and NSG directly on the shared storage
++    //
++    // The Index*-taking constructors leave own_fields = false,
++    // so neither index's destructor will ever try to delete
++    // shared_storage — it's owned by this stack frame.
++    // ========================================================
++
++    faiss::IndexHNSW hnsw(
++            &shared_storage,
++            HNSW_M);
++
++    hnsw.hnsw.efConstruction =
++            HNSW_EF_CONSTRUCTION;
++
++    hnsw.hnsw.efSearch =
++            HNSW_EF_SEARCH;
++
++    assert(!hnsw.own_fields);
++
++
++    faiss::IndexNSG nsg(
++            &shared_storage,
++            NSG_R);
++
++    nsg.GK =
++            NSG_GK;
++
++    // The Index*-taking IndexNSG ctor defaults build_type to 1
++    // (NNDescent); force brute force (0) to match
++    // build_nsg_graph_on_shared_storage, which only ports that
++    // path.
++    nsg.build_type =
++            0;
++
++    nsg.nsg.search_L =
++            NSG_SEARCH_L;
++
++    assert(!nsg.own_fields);
++
++    // FlatNav graph directly on the same shared storage: FlatNav only
++    // allocates (M links + label) per node; vectors are read from
++    // shared_storage.codes. Node id i == faiss id i.
++    const int FLATNAV_M =
++            (argc >= 11) ? stoi(argv[10]) : 32;
++
++    const int FLATNAV_EF_CONSTRUCTION =
++            (argc >= 12) ? stoi(argv[11]) : 100;
++
++    const int FLATNAV_EF_SEARCH =
++            (argc >= 13) ? stoi(argv[12]) : 64;
++
++    auto flatnav_index =
++            flatnav_faiss::make_flatnav_l2(
++                    shared_storage,
++                    FLATNAV_M);
++
++    assert(flatnav_index->usesExternalStorage());
++
++
++    // ========================================================
++    // Build both graphs in parallel against the shared storage
++    // ========================================================
++
++    std::cout
++            << "\n========================================\n"
++            << "Building HNSW + NSG in parallel "
++            << "on shared storage\n"
++            << "========================================\n";
++
++    double hnsw_build_seconds =
++            0.0;
++
++    double nsg_build_seconds =
++            0.0;
++
++    // Uses the process's actual CPU affinity mask (respects
++    // taskset/cgroups), not std::thread::hardware_concurrency()
++    // — see available_cpu_count() for why that distinction
++    // matters here. Used below to restore full parallelism for
++    // the (single-threaded caller) query phase.
++    const int total_threads =
++            available_cpu_count();
++
++    // ------------------------------------------------------
++    // Hard guarantee: exactly 2 threads do the building, one
++    // dedicated to HNSW and one dedicated to NSG.
++    //
++    //  1. Each build thread forces omp_set_num_threads(1) for
++    //     itself before calling into faiss. Faiss's internal
++    //     #pragma omp parallel regions then run entirely on the
++    //     calling thread instead of spawning extra OpenMP
++    //     worker threads — so no matter how many CPUs the
++    //     process can see, each build stays exactly 1 thread.
++    //     Total thread count for the build phase is therefore
++    //     always 2 (main spawns hnsw_thread + nsg_thread), never
++    //     more — this is what "half the CPUs" from the previous
++    //     version could NOT promise if it happened to compute
++    //     more than 1 thread per build.
++    //
++    //  2. Each thread is additionally pinned with
++    //     pthread_setaffinity_np to its own CPU id (drawn from
++    //     the process's actual affinity list, so it honors
++    //     taskset if present). This removes the OS scheduler
++    //     from the picture: HNSW's thread and NSG's thread are
++    //     each locked to a specific core for the whole build,
++    //     confirmed below via sched_getcpu().
++    // ------------------------------------------------------
++
++    std::vector<int> cpus =
++            affinity_cpu_list();
++
++    int cpu_for_hnsw =
++            cpus[0];
++
++    int cpu_for_nsg =
++            (cpus.size() >= 2) ? cpus[1] : cpus[0];
++
++    int cpu_for_flatnav =
++            (cpus.size() >= 3) ? cpus[2] : cpus[cpus.size() - 1];
++
++    std::cout
++            << "FlatNav thread -> CPU "
++            << cpu_for_flatnav
++            << "\n";
++
++    double flatnav_build_seconds =
++            0.0;
++
++    int flatnav_ran_on_cpu =
++            -1;
++
++    std::cout
++            << "Process CPU affinity list:";
++
++    for (int c : cpus) {
++        std::cout << " " << c;
++    }
++
++    std::cout << "\n";
++
++    if (cpus.size() < 2) {
++        std::cout
++                << "WARNING: only 1 CPU available to this "
++                << "process — HNSW and NSG threads will both "
++                << "be pinned to CPU "
++                << cpu_for_hnsw
++                << " and will time-share it. For true 2-core "
++                << "parallelism, run under e.g. "
++                << "`taskset -c 0-1 ./this_binary ...`.\n";
++    } else {
++        std::cout
++                << "HNSW thread -> CPU "
++                << cpu_for_hnsw
++                << ", NSG thread -> CPU "
++                << cpu_for_nsg
++                << "\n";
++    }
++
++    int hnsw_ran_on_cpu =
++            -1;
++
++    int nsg_ran_on_cpu =
++            -1;
++
++    auto overall_start =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    std::thread hnsw_thread(
++            [&]() {
++                // Exactly 1 thread for this build, always —
++                // not derived from CPU count.
++                omp_set_num_threads(1);
++
++                auto t0 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                build_hnsw_graph_on_shared_storage(
++                        hnsw,
++                        static_cast<size_t>(n),
++                        xb,
++                        /*verbose=*/false);
++
++                auto t1 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                hnsw_build_seconds =
++                        std::chrono::duration<double>(
++                                t1 -
++                                t0)
++                                .count();
++
++                hnsw_ran_on_cpu =
++                        sched_getcpu();
++            });
++
++    pin_thread_to_cpu(
++            hnsw_thread,
++            cpu_for_hnsw);
++
++    std::thread nsg_thread(
++            [&]() {
++                // Exactly 1 thread for this build, always —
++                // not derived from CPU count.
++                omp_set_num_threads(1);
++
++                auto t0 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                build_nsg_graph_on_shared_storage(
++                        nsg,
++                        static_cast<size_t>(n),
++                        xb,
++                        /*verbose=*/false);
++
++                auto t1 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                nsg_build_seconds =
++                        std::chrono::duration<double>(
++                                t1 -
++                                t0)
++                                .count();
++
++                nsg_ran_on_cpu =
++                        sched_getcpu();
++            });
++
++    pin_thread_to_cpu(
++            nsg_thread,
++            cpu_for_nsg);
++
++    std::thread flatnav_thread(
++            [&]() {
++                // FlatNav uses its own std::threads; 1 = this thread only.
++                auto t0 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                flatnav_faiss::build(
++                        *flatnav_index,
++                        FLATNAV_EF_CONSTRUCTION,
++                        /*num_threads=*/1);
++
++                auto t1 =
++                        std::chrono::
++                                high_resolution_clock::
++                                        now();
++
++                flatnav_build_seconds =
++                        std::chrono::duration<double>(
++                                t1 -
++                                t0)
++                                .count();
++
++                flatnav_ran_on_cpu =
++                        sched_getcpu();
++            });
++
++    pin_thread_to_cpu(
++            flatnav_thread,
++            cpu_for_flatnav);
++
++    hnsw_thread.join();
++    nsg_thread.join();
++    flatnav_thread.join();
++
++    std::cout
++            << "FlatNav build thread actually ran on CPU "
++            << flatnav_ran_on_cpu
++            << " (pinned to "
++            << cpu_for_flatnav
++            << "), "
++            << flatnav_build_seconds
++            << " sec, nodes = "
++            << flatnav_index->currentNumNodes()
++            << "\n";
++
++    std::cout
++            << "HNSW build thread actually ran on CPU "
++            << hnsw_ran_on_cpu
++            << " (pinned to "
++            << cpu_for_hnsw
++            << ")\n";
++
++    std::cout
++            << "NSG  build thread actually ran on CPU "
++            << nsg_ran_on_cpu
++            << " (pinned to "
++            << cpu_for_nsg
++            << ")\n";
++
++    auto overall_end =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    double parallel_build_wall_seconds =
++            std::chrono::duration<double>(
++                    overall_end -
++                    overall_start)
++                    .count();
++
++    std::cout
++            << "HNSW graph build complete "
++            << "(ntotal = "
++            << hnsw.ntotal
++            << ", "
++            << hnsw_build_seconds
++            << " sec on its own thread)\n";
++
++    std::cout
++            << "NSG  graph build complete "
++            << "(ntotal = "
++            << nsg.ntotal
++            << ", "
++            << nsg_build_seconds
++            << " sec on its own thread)\n";
++
++    std::cout
++            << "Combined wall-clock time  = "
++            << parallel_build_wall_seconds
++            << " sec (vs. "
++            << (hnsw_build_seconds + nsg_build_seconds)
++            << " sec if run sequentially)\n";
++
++    log_metric(
++            "construction",
++            "hnsw_build_seconds",
++            hnsw_build_seconds);
++
++    log_metric(
++            "construction",
++            "nsg_build_seconds",
++            nsg_build_seconds);
++
++    log_metric(
++            "construction",
++            "parallel_build_wall_seconds",
++            parallel_build_wall_seconds);
++
++    log_metric(
++            "construction",
++            "flatnav_build_seconds",
++            flatnav_build_seconds);
++
++
++    // ========================================================
++    // Verify the storage really was shared the whole time
++    // ========================================================
++
++    std::cout
++            << "\n========================================\n"
++            << "Verifying shared storage\n"
++            << "========================================\n";
++
++    std::cout
++            << "shared_storage address = "
++            << static_cast<void*>(&shared_storage)
++            << "\n";
++
++    std::cout
++            << "hnsw.storage           = "
++            << static_cast<void*>(hnsw.storage)
++            << "\n";
++
++    std::cout
++            << "nsg.storage            = "
++            << static_cast<void*>(nsg.storage)
++            << "\n";
++
++    assert(hnsw.storage == &shared_storage);
++    assert(nsg.storage == &shared_storage);
++    assert(hnsw.storage == nsg.storage);
++    assert(!hnsw.own_fields);
++    assert(!nsg.own_fields);
++    assert(shared_storage.ntotal == n);
++    assert(hnsw.ntotal == n);
++    assert(nsg.ntotal == n);
++
++    std::cout
++            << "flatnav data ptr       = "
++            << flatnav_index->externalStorageData()
++            << " (shared_storage.get_xb() = "
++            << static_cast<const void*>(shared_storage.get_xb())
++            << ")\n";
++
++    assert(flatnav_index->externalStorageData() ==
++           static_cast<const void*>(shared_storage.get_xb()));
++    assert(flatnav_index->currentNumNodes() ==
++           static_cast<size_t>(n));
++
++    std::cout
++            << "\nSUCCESS: HNSW and NSG were built in parallel "
++            << "directly on one shared storage instance — "
++            << "no vectors were ever duplicated.\n";
++	IndexSizeReport size_report = report_index_sizes(shared_storage, hnsw, nsg);
++
++	log_metric("index_size", "storage_bytes", static_cast<double>(size_report.storage_bytes));
++	log_metric("index_size", "hnsw_graph_overhead_bytes", static_cast<double>(size_report.hnsw_graph_overhead_bytes));
++	log_metric("index_size", "nsg_graph_overhead_bytes", static_cast<double>(size_report.nsg_graph_overhead_bytes));
++	log_metric("index_size", "combined_bytes", static_cast<double>(size_report.combined_bytes));
++	log_metric("index_size", "flatnav_graph_bytes", static_cast<double>(flatnav_faiss::graph_bytes(*flatnav_index)));
++	std::cout << "FlatNav graph (links + labels) = " << flatnav_faiss::graph_bytes(*flatnav_index) / 1e6 << " MB (vectors shared)\n";
++
++
++
++
++    // ========================================================
++    // Query phase
++    //
++    // Batch-search both indexes over the full query set,
++    // measure wall-clock time / QPS, and (if ground truth was
++    // provided) compute recall@RECALL_EVAL_K.
++    // ========================================================
++
++    std::cout
++            << "\n========================================\n"
++            << "Query phase\n"
++            << "========================================\n";
++
++    std::cout
++            << "nq = "
++            << nq
++            << ", k = "
++            << K
++            << "\n";
++
++    // Both builds ran with a capped OMP thread count; restore
++    // full parallelism for the (single, sequential) query phase.
++    omp_set_num_threads(
++            total_threads);
++
++
++    std::vector<float>
++            hnsw_distances(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++    std::vector<faiss::idx_t>
++            hnsw_labels(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++    std::vector<float>
++            nsg_distances(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++    std::vector<faiss::idx_t>
++            nsg_labels(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++
++    // --------------------------------------------------------
++    // HNSW batch search
++    // --------------------------------------------------------
++
++    std::cout
++            << "\nRunning HNSW batch search "
++            << "(efSearch = "
++            << hnsw.hnsw.efSearch
++            << ")...\n";
++
++    auto hnsw_search_start =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    hnsw.search(
++            nq,
++            xq,
++            K,
++            hnsw_distances.data(),
++            hnsw_labels.data());
++
++    auto hnsw_search_end =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    double hnsw_search_seconds =
++            std::chrono::duration<double>(
++                    hnsw_search_end -
++                    hnsw_search_start)
++                    .count();
++
++    double hnsw_qps =
++            static_cast<double>(nq) /
++            hnsw_search_seconds;
++
++    double hnsw_ms_per_query =
++            1000.0 *
++            hnsw_search_seconds /
++            static_cast<double>(nq);
++
++
++    std::cout
++            << "HNSW search time  = "
++            << hnsw_search_seconds
++            << " sec total, "
++            << hnsw_ms_per_query
++            << " ms/query, "
++            << hnsw_qps
++            << " QPS\n";
++
++    log_metric(
++            "query",
++            "hnsw_search_seconds_total",
++            hnsw_search_seconds);
++
++    log_metric(
++            "query",
++            "hnsw_ms_per_query",
++            hnsw_ms_per_query);
++
++    log_metric(
++            "query",
++            "hnsw_qps",
++            hnsw_qps);
++
++
++    // --------------------------------------------------------
++    // NSG batch search
++    // --------------------------------------------------------
++
++    std::cout
++            << "\nRunning NSG batch search "
++            << "(search_L = "
++            << nsg.nsg.search_L
++            << ")...\n";
++
++    auto nsg_search_start =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    nsg.search(
++            nq,
++            xq,
++            K,
++            nsg_distances.data(),
++            nsg_labels.data());
++
++    auto nsg_search_end =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    double nsg_search_seconds =
++            std::chrono::duration<double>(
++                    nsg_search_end -
++                    nsg_search_start)
++                    .count();
++
++    double nsg_qps =
++            static_cast<double>(nq) /
++            nsg_search_seconds;
++
++    double nsg_ms_per_query =
++            1000.0 *
++            nsg_search_seconds /
++            static_cast<double>(nq);
++
++
++    std::cout
++            << "NSG search time   = "
++            << nsg_search_seconds
++            << " sec total, "
++            << nsg_ms_per_query
++            << " ms/query, "
++            << nsg_qps
++            << " QPS\n";
++
++    log_metric(
++            "query",
++            "nsg_search_seconds_total",
++            nsg_search_seconds);
++
++    log_metric(
++            "query",
++            "nsg_ms_per_query",
++            nsg_ms_per_query);
++
++    log_metric(
++            "query",
++            "nsg_qps",
++            nsg_qps);
++
++    // --------------------------------------------------------
++    // FlatNav batch search (same storage, same ids)
++    // --------------------------------------------------------
++
++    std::vector<float>
++            flatnav_distances(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++    std::vector<faiss::idx_t>
++            flatnav_labels(
++                    static_cast<size_t>(nq) *
++                    static_cast<size_t>(K));
++
++    std::cout
++            << "\nRunning FlatNav batch search "
++            << "(ef_search = "
++            << FLATNAV_EF_SEARCH
++            << ", threads = "
++            << total_threads
++            << ")...\n";
++
++    auto flatnav_search_start =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    flatnav_faiss::search(
++            *flatnav_index,
++            nq,
++            xq,
++            static_cast<int>(K),
++            FLATNAV_EF_SEARCH,
++            flatnav_distances.data(),
++            flatnav_labels.data(),
++            /*num_threads=*/total_threads);
++
++    auto flatnav_search_end =
++            std::chrono::
++                    high_resolution_clock::
++                            now();
++
++    double flatnav_search_seconds =
++            std::chrono::duration<double>(
++                    flatnav_search_end -
++                    flatnav_search_start)
++                    .count();
++
++    double flatnav_qps =
++            static_cast<double>(nq) /
++            flatnav_search_seconds;
++
++    std::cout
++            << "FlatNav search time = "
++            << flatnav_search_seconds
++            << " sec total, "
++            << flatnav_qps
++            << " QPS\n";
++
++    log_metric(
++            "query",
++            "flatnav_search_seconds_total",
++            flatnav_search_seconds);
++
++    log_metric(
++            "query",
++            "flatnav_qps",
++            flatnav_qps);
++
++
++    // --------------------------------------------------------
++    // Recall (if ground truth was provided)
++    // --------------------------------------------------------
++
++    if (gt != nullptr) {
++
++        double hnsw_recall =
++                compute_recall_at_k(
++                        hnsw_labels,
++                        K,
++                        gt,
++                        gt_k,
++                        static_cast<size_t>(nq),
++                        RECALL_EVAL_K);
++
++        double nsg_recall =
++                compute_recall_at_k(
++                        nsg_labels,
++                        K,
++                        gt,
++                        gt_k,
++                        static_cast<size_t>(nq),
++                        RECALL_EVAL_K);
++
++        std::cout
++                << "\n----------------------------------------\n"
++                << "Recall@"
++                << RECALL_EVAL_K
++                << "\n"
++                << "----------------------------------------\n";
++
++        std::cout
++                << "HNSW recall@"
++                << RECALL_EVAL_K
++                << " = "
++                << hnsw_recall
++                << "\n";
++
++        std::cout
++                << "NSG  recall@"
++                << RECALL_EVAL_K
++                << " = "
++                << nsg_recall
++                << "\n";
++
++        log_metric(
++                "query",
++                "hnsw_recall_at_" +
++                        std::to_string(RECALL_EVAL_K),
++                hnsw_recall);
++
++        log_metric(
++                "query",
++                "nsg_recall_at_" +
++                        std::to_string(RECALL_EVAL_K),
++                nsg_recall);
++
++        double flatnav_recall =
++                compute_recall_at_k(
++                        flatnav_labels,
++                        K,
++                        gt,
++                        gt_k,
++                        static_cast<size_t>(nq),
++                        RECALL_EVAL_K);
++
++        std::cout
++                << "FlatNav recall@"
++                << RECALL_EVAL_K
++                << " = "
++                << flatnav_recall
++                << "\n";
++
++        log_metric(
++                "query",
++                "flatnav_recall_at_" +
++                        std::to_string(RECALL_EVAL_K),
++                flatnav_recall);
++    }
++
++
++    // --------------------------------------------------------
++    // Show first query's neighbors for a quick sanity look
++    // --------------------------------------------------------
++
++    std::cout
++            << "\nHNSW neighbors for query 0:\n";
++
++    for (
++            faiss::idx_t i = 0;
++            i < K;
++            ++i) {
++
++        std::cout
++                << "  "
++                << i
++                << ": id="
++                << hnsw_labels[i]
++                << " distance="
++                << hnsw_distances[i]
++                << "\n";
++    }
++
++    std::cout
++            << "\nNSG neighbors for query 0:\n";
++
++    for (
++            faiss::idx_t i = 0;
++            i < K;
++            ++i) {
++
++        std::cout
++                << "  "
++                << i
++                << ": id="
++                << nsg_labels[i]
++                << " distance="
++                << nsg_distances[i]
++                << "\n";
++    }
++
++
++    // ========================================================
++    // Final summary
++    // ========================================================
++
++    std::cout
++            << "\n========================================\n"
++            << "Summary\n"
++            << "========================================\n";
++
++    std::cout
++            << "Vectors               = "
++            << n
++            << "\n";
++
++    std::cout
++            << "Queries                = "
++            << nq
++            << "\n";
++
++    std::cout
++            << "Dimension              = "
++            << d
++            << "\n";
++
++    std::cout
++            << "Shared storage total   = "
++            << shared_storage.ntotal
++            << "\n";
++
++    std::cout
++            << "HNSW build time (own thread) = "
++            << hnsw_build_seconds
++            << " sec\n";
++
++    std::cout
++            << "NSG  build time (own thread) = "
++            << nsg_build_seconds
++            << " sec\n";
++
++    std::cout
++            << "Parallel build wall time     = "
++            << parallel_build_wall_seconds
++            << " sec\n";
++
++    std::cout
++            << "HNSW QPS                = "
++            << hnsw_qps
++            << "\n";
++
++    std::cout
++            << "NSG  QPS                = "
++            << nsg_qps
++            << "\n";
++
++
++    // ========================================================
++    // Cleanup
++    //
++    // xb / xq are separate host buffers; shared_storage keeps
++    // its own copy internally and is a stack object owned by
++    // this function, so it's destroyed automatically. Neither
++    // hnsw nor nsg will try to delete it (own_fields is false
++    // on both), so there's no double-free risk here.
++    // ========================================================
++
++    delete[] xb;
++    delete[] xq;
++
++    if (gt != nullptr) {
++        delete[] gt;
++    }
++
++    if (g_log_file.is_open()) {
++        g_log_file.close();
++    }
++
++
++    std::cout
++            << "\n========================================\n"
++            << "Done\n"
++            << "========================================\n";
++
++
++    return 0;
++}
+diff --git a/demos/demo_paired_nsg_flatnav_same_storage_parallel.cpp b/demos/demo_paired_nsg_flatnav_same_storage_parallel.cpp
+new file mode 100644
+index 00000000..a1e8416e
+--- /dev/null
++++ b/demos/demo_paired_nsg_flatnav_same_storage_parallel.cpp
+@@ -0,0 +1,239 @@
++// ============================================================
++// demo_paired_nsg_flatnav_same_storage_parallel.cpp
++//
++// NSG (faiss) + FlatNav built in parallel on ONE shared
++// faiss::IndexFlatL2. The vectors exist exactly once:
++//
++//   shared_storage (IndexFlatL2)  <- the only copy of the vectors
++//     ^                    ^
++//     |                    |
++//   faiss::IndexNSG      FlatNav (graph only: M links + label per node,
++//   (&shared_storage)     distances read from shared_storage.codes)
++//
++// Node / vector id i is the same in both indexes, so results can be
++// compared or paired directly.
++//
++// Each build runs on its own pinned CPU with exactly one thread.
++// FlatNav and faiss are both compiled for AVX2 (no AVX-512); the
++// SIMD configuration is printed and logged at startup.
++//
++// Usage:
++//   demo_paired_nsg_flatnav_same_storage_parallel
++//       base.fvecs query.fvecs [gt.ivecs|-] [log.csv]
++//       [NSG_R=32] [NSG_search_L=64]
++//       [FLATNAV_M=32] [FLATNAV_efConstruction=100] [FLATNAV_efSearch=64]
++// ============================================================
++
++#include "paired_flatnav_common.hpp"
++
++int main(int argc, char** argv) {
++    if (argc < 3) {
++        std::cerr << "Usage:\n  " << argv[0]
++                  << " base.fvecs query.fvecs [gt.ivecs|-] [log.csv]"
++                  << " [NSG_R] [NSG_search_L]"
++                  << " [FLATNAV_M] [FLATNAV_efC] [FLATNAV_efS]\n";
++        return 1;
++    }
++    const char* base_file = argv[1];
++    const char* query_file = argv[2];
++    const char* gt_file = (argc >= 4) ? argv[3] : nullptr;
++    const std::string log_path = (argc >= 5) ? argv[4] : "benchmark_log.csv";
++    log_init(log_path);
++
++    // ========================================================
++    // Parameters
++    // ========================================================
++    const int NSG_R = (argc >= 6) ? stoi(argv[5]) : 32;
++    const int NSG_SEARCH_L = (argc >= 7) ? stoi(argv[6]) : 64;
++    const int NSG_GK = 64;  // kNN-graph degree for NSG's brute-force build (as in the HNSW+NSG demos)
++    const int FLATNAV_M = (argc >= 8) ? stoi(argv[7]) : 32;
++    const int FLATNAV_EF_CONSTRUCTION = (argc >= 9) ? stoi(argv[8]) : 100;
++    const int FLATNAV_EF_SEARCH = (argc >= 10) ? stoi(argv[9]) : 64;
++    const faiss::idx_t K = 20;
++    const size_t RECALL_EVAL_K = 20;
++
++    std::cout << "\n========================================\n"
++              << "Paired NSG + FlatNav Demo (same storage)\n"
++              << "========================================\n"
++              << "NSG R                  = " << NSG_R << "\n"
++              << "NSG GK                 = " << NSG_GK << "\n"
++              << "NSG search_L           = " << NSG_SEARCH_L << "\n"
++              << "FlatNav M              = " << FLATNAV_M << "\n"
++              << "FlatNav efConstruction = " << FLATNAV_EF_CONSTRUCTION << "\n"
++              << "FlatNav efSearch       = " << FLATNAV_EF_SEARCH << "\n";
++    log_metric("params", "nsg_R", NSG_R);
++    log_metric("params", "nsg_GK", NSG_GK);
++    log_metric("params", "nsg_search_L", NSG_SEARCH_L);
++    log_metric("params", "flatnav_M", FLATNAV_M);
++    log_metric("params", "flatnav_ef_construction", FLATNAV_EF_CONSTRUCTION);
++    log_metric("params", "flatnav_ef_search", FLATNAV_EF_SEARCH);
++
++    report_simd_config();
++
++    PairDataset ds;
++    if (!load_pair_dataset(base_file, query_file, gt_file, RECALL_EVAL_K, ds)) {
++        return 1;
++    }
++    const int d = ds.d;
++    const faiss::idx_t n = ds.n;
++
++    // ========================================================
++    // Populate ONE shared storage, once
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Populating shared storage\n"
++              << "========================================\n";
++    faiss::IndexFlatL2 shared_storage(d);
++    shared_storage.add(n, ds.xb);
++    std::cout << "shared_storage.ntotal = " << shared_storage.ntotal << "\n";
++
++    // ========================================================
++    // Construct both indexes directly on the shared storage
++    // ========================================================
++    // Index*-taking ctor: own_fields = false, NSG never adds to or
++    // frees shared_storage. That ctor defaults build_type to 1
++    // (NNDescent); force brute force (0) to match
++    // build_nsg_graph_on_shared_storage, which only ports that path.
++    faiss::IndexNSG nsg(&shared_storage, NSG_R);
++    nsg.GK = NSG_GK;
++    nsg.build_type = 0;
++    nsg.nsg.search_L = NSG_SEARCH_L;
++    PAIR_CHECK(!nsg.own_fields);
++
++    // FlatNav reads shared_storage.codes directly (no copy).
++    auto flatnav_index = flatnav_faiss::make_flatnav_l2(shared_storage, FLATNAV_M);
++    PAIR_CHECK(flatnav_index->usesExternalStorage());
++
++    // ========================================================
++    // Build both graphs in parallel, one pinned thread each
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Building NSG + FlatNav in parallel on shared storage\n"
++              << "========================================\n";
++    const int total_threads = available_cpu_count();
++    const std::pair<int, int> build_cpus = pick_two_cpus();
++    const int cpu_for_nsg = build_cpus.first;
++    const int cpu_for_flatnav = build_cpus.second;
++    std::cout << "NSG thread -> CPU " << cpu_for_nsg << ", FlatNav thread -> CPU "
++              << cpu_for_flatnav << "\n";
++
++    PinnedBuild nsg_build, flatnav_build;
++    double parallel_build_wall_seconds = time_seconds([&]() {
++        std::thread nsg_thread = start_pinned_build(cpu_for_nsg, nsg_build, [&]() {
++            build_nsg_graph_on_shared_storage(
++                    nsg, static_cast<size_t>(n), ds.xb, /*verbose=*/false);
++        });
++        std::thread flatnav_thread = start_pinned_build(cpu_for_flatnav, flatnav_build, [&]() {
++            flatnav_faiss::build(*flatnav_index, FLATNAV_EF_CONSTRUCTION, /*num_threads=*/1);
++        });
++        nsg_thread.join();
++        flatnav_thread.join();
++    });
++
++    std::cout << "NSG     build: " << nsg_build.seconds << " sec on CPU " << nsg_build.ran_on_cpu
++              << " (pinned to " << nsg_build.requested_cpu << "), ntotal = " << nsg.ntotal << "\n"
++              << "FlatNav build: " << flatnav_build.seconds << " sec on CPU "
++              << flatnav_build.ran_on_cpu << " (pinned to " << flatnav_build.requested_cpu
++              << "), nodes = " << flatnav_index->currentNumNodes() << "\n"
++              << "Combined wall-clock time = " << parallel_build_wall_seconds << " sec (vs. "
++              << (nsg_build.seconds + flatnav_build.seconds) << " sec if run sequentially)\n";
++    log_metric("construction", "nsg_build_seconds", nsg_build.seconds);
++    log_metric("construction", "flatnav_build_seconds", flatnav_build.seconds);
++    log_metric("construction", "parallel_build_wall_seconds", parallel_build_wall_seconds);
++
++    // ========================================================
++    // Verify the storage really was shared
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Verifying shared storage\n"
++              << "========================================\n"
++              << "shared_storage address      = " << static_cast<void*>(&shared_storage) << "\n"
++              << "nsg.storage                = " << static_cast<void*>(nsg.storage) << "\n"
++              << "shared_storage.get_xb()     = "
++              << static_cast<const void*>(shared_storage.get_xb()) << "\n"
++              << "FlatNav vector pointer      = " << flatnav_index->externalStorageData() << "\n";
++    PAIR_CHECK(nsg.storage == &shared_storage);
++    PAIR_CHECK(!nsg.own_fields);
++    PAIR_CHECK(flatnav_index->externalStorageData() ==
++               static_cast<const void*>(shared_storage.get_xb()));
++    PAIR_CHECK(shared_storage.ntotal == n);
++    PAIR_CHECK(nsg.ntotal == n);
++    PAIR_CHECK(flatnav_index->currentNumNodes() == static_cast<size_t>(n));
++    std::cout << "\nSUCCESS: NSG and FlatNav were built in parallel directly on one "
++              << "shared storage instance — no vectors were ever duplicated.\n";
++
++    // ========================================================
++    // Index sizes
++    // ========================================================
++    const size_t storage_bytes = flat_storage_bytes_direct(shared_storage);
++    const size_t nsg_graph = nsg_graph_bytes_direct(nsg.nsg);
++    const size_t flatnav_graph = flatnav_faiss::graph_overhead_bytes(*flatnav_index);
++    const size_t combined = storage_bytes + nsg_graph + flatnav_graph;
++    const size_t unshared = 2 * storage_bytes + nsg_graph + flatnav_graph;
++    std::cout << "\n========================================\n"
++              << "Index size breakdown\n"
++              << "========================================\n"
++              << "  Shared vector storage   : " << to_mb(storage_bytes) << " MB\n"
++              << "  NSG graph overhead     : " << to_mb(nsg_graph) << " MB\n"
++              << "  FlatNav graph overhead  : " << to_mb(flatnav_graph) << " MB\n"
++              << "  Combined (storage x1)   : " << to_mb(combined) << " MB\n"
++              << "  If not shared           : " << to_mb(unshared) << " MB (saved "
++              << to_mb(unshared - combined) << " MB)\n"
++              << "  Current RSS             : " << to_mb(get_current_rss_bytes()) << " MB\n";
++    log_metric("index_size", "storage_bytes", static_cast<double>(storage_bytes));
++    log_metric("index_size", "nsg_graph_overhead_bytes", static_cast<double>(nsg_graph));
++    log_metric("index_size", "flatnav_graph_overhead_bytes", static_cast<double>(flatnav_graph));
++    log_metric("index_size", "combined_bytes", static_cast<double>(combined));
++
++    // ========================================================
++    // Query phase (full parallelism, same thread count for both)
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Query phase (nq = " << ds.nq << ", k = " << K << ", threads = "
++              << total_threads << ")\n"
++              << "========================================\n";
++    omp_set_num_threads(total_threads);
++    const size_t nk = static_cast<size_t>(ds.nq) * static_cast<size_t>(K);
++
++    std::vector<float> nsg_distances(nk);
++    std::vector<faiss::idx_t> nsg_labels(nk);
++    double nsg_seconds = time_seconds([&]() {
++        nsg.search(ds.nq, ds.xq, K, nsg_distances.data(), nsg_labels.data());
++    });
++    QueryReport nsg_q = report_query("nsg", nsg_seconds, nsg_labels, K, ds, RECALL_EVAL_K);
++
++    std::vector<float> flatnav_distances(nk);
++    std::vector<faiss::idx_t> flatnav_labels(nk);
++    double flatnav_seconds = time_seconds([&]() {
++        flatnav_faiss::search(
++                *flatnav_index,
++                ds.nq,
++                ds.xq,
++                static_cast<int>(K),
++                FLATNAV_EF_SEARCH,
++                flatnav_distances.data(),
++                flatnav_labels.data(),
++                /*num_threads=*/total_threads);
++    });
++    QueryReport flatnav_q =
++            report_query("flatnav", flatnav_seconds, flatnav_labels, K, ds, RECALL_EVAL_K);
++
++    // ========================================================
++    // Summary
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Summary (same storage)\n"
++              << "========================================\n"
++              << "NSG     build = " << nsg_build.seconds << " s, QPS = " << nsg_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << nsg_q.recall << "\n"
++              << "FlatNav build = " << flatnav_build.seconds << " s, QPS = " << flatnav_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << flatnav_q.recall << "\n"
++              << "Parallel build wall time = " << parallel_build_wall_seconds << " s\n"
++              << "Total memory (storage x1) = " << to_mb(combined) << " MB\n";
++
++    if (g_log_file.is_open()) {
++        g_log_file.close();
++    }
++    std::cout << "\nDone\n";
++    return 0;
++}
+diff --git a/demos/demo_paired_nsg_flatnav_separate_storage_parallel.cpp b/demos/demo_paired_nsg_flatnav_separate_storage_parallel.cpp
+new file mode 100644
+index 00000000..b5258f3d
+--- /dev/null
++++ b/demos/demo_paired_nsg_flatnav_separate_storage_parallel.cpp
+@@ -0,0 +1,235 @@
++// ============================================================
++// demo_paired_nsg_flatnav_separate_storage_parallel.cpp
++//
++// NSG (faiss) + FlatNav built in parallel, each with its OWN copy of
++// the vectors (the baseline for the same-storage demo):
++//
++//   faiss::IndexNSGFlat   -> own IndexFlatL2 (own_fields = true)
++//   FlatNav (owned)       -> own interleaved [vector][M links][label] nodes
++//
++// Both are filled from the same xb in the same order, so id i is the
++// same vector in both indexes.
++//
++// Each build runs on its own pinned CPU with exactly one thread.
++// FlatNav and faiss are both compiled for AVX2 (no AVX-512); the
++// SIMD configuration is printed and logged at startup.
++//
++// Usage:
++//   demo_paired_nsg_flatnav_separate_storage_parallel
++//       base.fvecs query.fvecs [gt.ivecs|-] [log.csv]
++//       [NSG_R=32] [NSG_search_L=64]
++//       [FLATNAV_M=32] [FLATNAV_efConstruction=100] [FLATNAV_efSearch=64]
++// ============================================================
++
++#include "paired_flatnav_common.hpp"
++
++int main(int argc, char** argv) {
++    if (argc < 3) {
++        std::cerr << "Usage:\n  " << argv[0]
++                  << " base.fvecs query.fvecs [gt.ivecs|-] [log.csv]"
++                  << " [NSG_R] [NSG_search_L]"
++                  << " [FLATNAV_M] [FLATNAV_efC] [FLATNAV_efS]\n";
++        return 1;
++    }
++    const char* base_file = argv[1];
++    const char* query_file = argv[2];
++    const char* gt_file = (argc >= 4) ? argv[3] : nullptr;
++    const std::string log_path = (argc >= 5) ? argv[4] : "benchmark_log.csv";
++    log_init(log_path);
++
++    // ========================================================
++    // Parameters
++    // ========================================================
++    const int NSG_R = (argc >= 6) ? stoi(argv[5]) : 32;
++    const int NSG_SEARCH_L = (argc >= 7) ? stoi(argv[6]) : 64;
++    const int NSG_GK = 64;  // kNN-graph degree for NSG's brute-force build (as in the HNSW+NSG demos)
++    const int FLATNAV_M = (argc >= 8) ? stoi(argv[7]) : 32;
++    const int FLATNAV_EF_CONSTRUCTION = (argc >= 9) ? stoi(argv[8]) : 100;
++    const int FLATNAV_EF_SEARCH = (argc >= 10) ? stoi(argv[9]) : 64;
++    const faiss::idx_t K = 20;
++    const size_t RECALL_EVAL_K = 20;
++
++    std::cout << "\n========================================\n"
++              << "Paired NSG + FlatNav Demo (separate storage)\n"
++              << "========================================\n"
++              << "NSG R                  = " << NSG_R << "\n"
++              << "NSG GK                 = " << NSG_GK << "\n"
++              << "NSG search_L           = " << NSG_SEARCH_L << "\n"
++              << "FlatNav M              = " << FLATNAV_M << "\n"
++              << "FlatNav efConstruction = " << FLATNAV_EF_CONSTRUCTION << "\n"
++              << "FlatNav efSearch       = " << FLATNAV_EF_SEARCH << "\n";
++    log_metric("params", "nsg_R", NSG_R);
++    log_metric("params", "nsg_GK", NSG_GK);
++    log_metric("params", "nsg_search_L", NSG_SEARCH_L);
++    log_metric("params", "flatnav_M", FLATNAV_M);
++    log_metric("params", "flatnav_ef_construction", FLATNAV_EF_CONSTRUCTION);
++    log_metric("params", "flatnav_ef_search", FLATNAV_EF_SEARCH);
++
++    report_simd_config();
++
++    PairDataset ds;
++    if (!load_pair_dataset(base_file, query_file, gt_file, RECALL_EVAL_K, ds)) {
++        return 1;
++    }
++    const int d = ds.d;
++    const faiss::idx_t n = ds.n;
++
++    // ========================================================
++    // Construct both indexes with SEPARATE, independent storage
++    // ========================================================
++    // IndexNSGFlat creates and owns its IndexFlatL2 (own_fields = true);
++    // nsg.add() below fills it and builds the graph, as stock faiss does.
++    // build_type = 0: brute-force kNN graph, same as the shared version.
++    faiss::IndexNSGFlat nsg(d, NSG_R, faiss::METRIC_L2);
++    nsg.GK = NSG_GK;
++    nsg.build_type = 0;
++    nsg.nsg.search_L = NSG_SEARCH_L;
++    PAIR_CHECK(nsg.own_fields);
++
++    // Regular FlatNav index: copies the vectors into its own node blocks.
++    auto flatnav_index = flatnav_faiss::make_flatnav_l2_owned(d, static_cast<size_t>(n), FLATNAV_M);
++    PAIR_CHECK(!flatnav_index->usesExternalStorage());
++
++    // ========================================================
++    // Build both graphs in parallel, one pinned thread each
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Building NSG + FlatNav in parallel (separate storage)\n"
++              << "========================================\n";
++    const int total_threads = available_cpu_count();
++    const std::pair<int, int> build_cpus = pick_two_cpus();
++    const int cpu_for_nsg = build_cpus.first;
++    const int cpu_for_flatnav = build_cpus.second;
++    std::cout << "NSG thread -> CPU " << cpu_for_nsg << ", FlatNav thread -> CPU "
++              << cpu_for_flatnav << "\n";
++
++    PinnedBuild nsg_build, flatnav_build;
++    double parallel_build_wall_seconds = time_seconds([&]() {
++        std::thread nsg_thread = start_pinned_build(cpu_for_nsg, nsg_build, [&]() {
++            // Standard API: fills nsg's own storage AND builds the graph.
++            nsg.add(n, ds.xb);
++        });
++        std::thread flatnav_thread = start_pinned_build(cpu_for_flatnav, flatnav_build, [&]() {
++            // Copies xb into FlatNav's own memory and builds the graph.
++            flatnav_faiss::build_owned(
++                    *flatnav_index, ds.xb, static_cast<size_t>(n), FLATNAV_EF_CONSTRUCTION,
++                    /*num_threads=*/1);
++        });
++        nsg_thread.join();
++        flatnav_thread.join();
++    });
++
++    std::cout << "NSG     build: " << nsg_build.seconds << " sec on CPU " << nsg_build.ran_on_cpu
++              << " (pinned to " << nsg_build.requested_cpu << "), ntotal = " << nsg.ntotal << "\n"
++              << "FlatNav build: " << flatnav_build.seconds << " sec on CPU "
++              << flatnav_build.ran_on_cpu << " (pinned to " << flatnav_build.requested_cpu
++              << "), nodes = " << flatnav_index->currentNumNodes() << "\n"
++              << "Combined wall-clock time = " << parallel_build_wall_seconds << " sec (vs. "
++              << (nsg_build.seconds + flatnav_build.seconds) << " sec if run sequentially)\n";
++    log_metric("construction", "nsg_build_seconds", nsg_build.seconds);
++    log_metric("construction", "flatnav_build_seconds", flatnav_build.seconds);
++    log_metric("construction", "parallel_build_wall_seconds", parallel_build_wall_seconds);
++
++    // ========================================================
++    // Verify the storage really is separate
++    // ========================================================
++    const auto* nsg_flat = dynamic_cast<const faiss::IndexFlat*>(nsg.storage);
++    PAIR_CHECK(nsg_flat != nullptr);
++    std::cout << "\n========================================\n"
++              << "Verifying independent vector storage\n"
++              << "========================================\n"
++              << "nsg.storage                = " << static_cast<const void*>(nsg.storage) << "\n"
++              << "nsg.storage->get_xb()      = " << static_cast<const void*>(nsg_flat->get_xb())
++              << "\n"
++              << "FlatNav                     = owns its vectors ("
++              << flatnav_index->nodeSizeBytes() << " B/node incl. "
++              << flatnav_index->dataSizeBytes() << " B vector)\n";
++    PAIR_CHECK(nsg.own_fields);
++    PAIR_CHECK(nsg.storage->ntotal == n);
++    PAIR_CHECK(nsg.ntotal == n);
++    PAIR_CHECK(!flatnav_index->usesExternalStorage());
++    PAIR_CHECK(flatnav_index->externalStorageData() == nullptr);
++    PAIR_CHECK(flatnav_index->currentNumNodes() == static_cast<size_t>(n));
++    std::cout << "\nSUCCESS: NSG and FlatNav were built in parallel, each on its own "
++              << "separate, independent vector storage.\n";
++
++    // ========================================================
++    // Index sizes (storage_bytes = both vector copies)
++    // ========================================================
++    const size_t nsg_storage_bytes = flat_storage_bytes_direct(*nsg_flat);
++    const size_t flatnav_vector_bytes = flatnav_faiss::vector_bytes(*flatnav_index);
++    const size_t storage_bytes = nsg_storage_bytes + flatnav_vector_bytes;
++    const size_t nsg_graph = nsg_graph_bytes_direct(nsg.nsg);
++    const size_t flatnav_graph = flatnav_faiss::graph_overhead_bytes(*flatnav_index);
++    const size_t combined = storage_bytes + nsg_graph + flatnav_graph;
++    const size_t if_shared = nsg_storage_bytes + nsg_graph + flatnav_graph;
++    std::cout << "\n========================================\n"
++              << "Index size breakdown\n"
++              << "========================================\n"
++              << "  NSG vector storage     : " << to_mb(nsg_storage_bytes) << " MB\n"
++              << "  FlatNav vector copy     : " << to_mb(flatnav_vector_bytes) << " MB\n"
++              << "  NSG graph overhead     : " << to_mb(nsg_graph) << " MB\n"
++              << "  FlatNav graph overhead  : " << to_mb(flatnav_graph) << " MB\n"
++              << "  Combined (storage x2)   : " << to_mb(combined) << " MB\n"
++              << "  If shared               : " << to_mb(if_shared) << " MB (would save "
++              << to_mb(combined - if_shared) << " MB)\n"
++              << "  Current RSS             : " << to_mb(get_current_rss_bytes()) << " MB\n";
++    log_metric("index_size", "storage_bytes", static_cast<double>(storage_bytes));
++    log_metric("index_size", "nsg_storage_bytes", static_cast<double>(nsg_storage_bytes));
++    log_metric("index_size", "flatnav_vector_bytes", static_cast<double>(flatnav_vector_bytes));
++    log_metric("index_size", "nsg_graph_overhead_bytes", static_cast<double>(nsg_graph));
++    log_metric("index_size", "flatnav_graph_overhead_bytes", static_cast<double>(flatnav_graph));
++    log_metric("index_size", "combined_bytes", static_cast<double>(combined));
++
++    // ========================================================
++    // Query phase (full parallelism, same thread count for both)
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Query phase (nq = " << ds.nq << ", k = " << K << ", threads = "
++              << total_threads << ")\n"
++              << "========================================\n";
++    omp_set_num_threads(total_threads);
++    const size_t nk = static_cast<size_t>(ds.nq) * static_cast<size_t>(K);
++
++    std::vector<float> nsg_distances(nk);
++    std::vector<faiss::idx_t> nsg_labels(nk);
++    double nsg_seconds = time_seconds([&]() {
++        nsg.search(ds.nq, ds.xq, K, nsg_distances.data(), nsg_labels.data());
++    });
++    QueryReport nsg_q = report_query("nsg", nsg_seconds, nsg_labels, K, ds, RECALL_EVAL_K);
++
++    std::vector<float> flatnav_distances(nk);
++    std::vector<faiss::idx_t> flatnav_labels(nk);
++    double flatnav_seconds = time_seconds([&]() {
++        flatnav_faiss::search(
++                *flatnav_index,
++                ds.nq,
++                ds.xq,
++                static_cast<int>(K),
++                FLATNAV_EF_SEARCH,
++                flatnav_distances.data(),
++                flatnav_labels.data(),
++                /*num_threads=*/total_threads);
++    });
++    QueryReport flatnav_q =
++            report_query("flatnav", flatnav_seconds, flatnav_labels, K, ds, RECALL_EVAL_K);
++
++    // ========================================================
++    // Summary
++    // ========================================================
++    std::cout << "\n========================================\n"
++              << "Summary (separate storage)\n"
++              << "========================================\n"
++              << "NSG     build = " << nsg_build.seconds << " s, QPS = " << nsg_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << nsg_q.recall << "\n"
++              << "FlatNav build = " << flatnav_build.seconds << " s, QPS = " << flatnav_q.qps
++              << ", recall@" << RECALL_EVAL_K << " = " << flatnav_q.recall << "\n"
++              << "Parallel build wall time = " << parallel_build_wall_seconds << " s\n"
++              << "Total memory (storage x2) = " << to_mb(combined) << " MB\n";
++
++    if (g_log_file.is_open()) {
++        g_log_file.close();
++    }
++    std::cout << "\nDone\n";
++    return 0;
++}
+diff --git a/demos/flatnav_faiss_storage.hpp b/demos/flatnav_faiss_storage.hpp
+new file mode 100644
+index 00000000..c79a985b
+--- /dev/null
++++ b/demos/flatnav_faiss_storage.hpp
+@@ -0,0 +1,228 @@
++#pragma once
++// ============================================================
++// flatnav_faiss_storage.hpp
++//
++// Glue that lets a FlatNav graph use a faiss::IndexFlat as its vector
++// storage (shared storage). FlatNav allocates only its graph
++// ([M links][label] per node); every distance reads the vector
++// straight out of faiss' `codes` buffer (IndexFlat::get_xb()).
++//
++// Node id i in FlatNav == row i in the faiss storage == faiss id i,
++// so FlatNav, IndexHNSW(&storage) and IndexNSG(&storage) all agree on
++// ids and can be compared / paired directly.
++//
++// Requirements
++//   * FlatNav with ExternalVectorStorage support (flatnav branch
++//     `faiss-shared-storage`, include/flatnav/index/Index.h).
++//   * SIMD: the demos build FlatNav with AVX2 (no AVX-512) by default;
++//     see FLATNAV_SIMD in demos/CMakeLists.txt.
++//   * storage is float32 IndexFlatL2 (-> FlatNav L2) or IndexFlatIP
++//     (-> FlatNav inner product). Scalar-quantized FlatNav cannot share
++//     because its internal vector format differs from faiss'.
++//   * Populate the storage before building, and don't call
++//     storage.add() while FlatNav is reading it (std::vector growth
++//     can move the buffer). If you do grow it, call
++//     reattach(index, storage) before the next build/search.
++// ============================================================
++
++#include <faiss/IndexFlat.h>
++#include <faiss/MetricType.h>
++#include <faiss/impl/FaissAssert.h>
++
++#include <flatnav/distances/InnerProductDistance.h>
++#include <flatnav/distances/SquaredL2Distance.h>
++#include <flatnav/index/Index.h>
++#include <flatnav/util/Multithreading.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <memory>
++#include <numeric>
++#include <stdexcept>
++#include <vector>
++
++namespace flatnav_faiss {
++
++using flatnav::util::DataType;
++using L2Distance = flatnav::distances::SquaredL2Distance<DataType::float32>;
++using IPDistance = flatnav::distances::InnerProductDistance<DataType::float32>;
++
++// int labels: label i == faiss id i (fine up to 2^31 - 1 vectors).
++using FlatNavL2 = flatnav::Index<L2Distance, int>;
++using FlatNavIP = flatnav::Index<IPDistance, int>;
++
++// View of a faiss IndexFlat's vectors as FlatNav external storage.
++inline flatnav::ExternalVectorStorage storage_view(const faiss::IndexFlat& storage) {
++    return flatnav::ExternalVectorStorage{
++            /* data = */ storage.get_xb(),
++            /* num_vectors = */ static_cast<size_t>(storage.ntotal),
++            /* row_stride_bytes = */ static_cast<size_t>(storage.d) * sizeof(float)};
++}
++
++// Empty FlatNav L2 graph whose vectors are `storage` (an IndexFlatL2).
++// max_nodes = 0 -> storage.ntotal.
++inline std::unique_ptr<FlatNavL2> make_flatnav_l2(
++        const faiss::IndexFlat& storage,
++        int M,
++        size_t max_nodes = 0,
++        bool collect_stats = false) {
++    FAISS_THROW_IF_NOT_MSG(
++            storage.metric_type == faiss::METRIC_L2,
++            "make_flatnav_l2: storage must be an IndexFlatL2");
++    FAISS_THROW_IF_NOT_MSG(storage.ntotal > 0, "storage is empty: add vectors first");
++    return std::make_unique<FlatNavL2>(
++            L2Distance::create(storage.d),
++            static_cast<int>(max_nodes ? max_nodes : storage.ntotal),
++            M,
++            storage_view(storage),
++            collect_stats,
++            DataType::float32);
++}
++
++// Empty FlatNav inner-product graph whose vectors are `storage` (an IndexFlatIP).
++inline std::unique_ptr<FlatNavIP> make_flatnav_ip(
++        const faiss::IndexFlat& storage,
++        int M,
++        size_t max_nodes = 0,
++        bool collect_stats = false) {
++    FAISS_THROW_IF_NOT_MSG(
++            storage.metric_type == faiss::METRIC_INNER_PRODUCT,
++            "make_flatnav_ip: storage must be an IndexFlatIP");
++    FAISS_THROW_IF_NOT_MSG(storage.ntotal > 0, "storage is empty: add vectors first");
++    return std::make_unique<FlatNavIP>(
++            IPDistance::create(storage.d),
++            static_cast<int>(max_nodes ? max_nodes : storage.ntotal),
++            M,
++            storage_view(storage),
++            collect_stats,
++            DataType::float32);
++}
++
++// Call after storage.add() (buffer may have moved) or after
++// FlatNavL2::loadIndex() of a graph saved in shared-storage mode.
++template <class FlatNavIndex>
++inline void reattach(FlatNavIndex& index, const faiss::IndexFlat& storage) {
++    index.attachExternalStorage(storage_view(storage));
++}
++
++// Build the graph over storage rows not yet in the graph.
++// num_threads = FlatNav's own std::thread workers (independent of OpenMP).
++template <class FlatNavIndex>
++inline void build(
++        FlatNavIndex& index,
++        int ef_construction,
++        int num_threads = 1,
++        int num_initializations = 100) {
++    index.setNumThreads(static_cast<uint32_t>(std::max(1, num_threads)));
++    size_t todo = std::min(index.externalStorageNumVectors(), index.maxNodeCount()) -
++            index.currentNumNodes();
++    index.addFromStorage(todo, ef_construction, num_initializations);
++}
++
++// Faiss-style batched search: fills D/I as (nq x k), -1 padded.
++// Uses FlatNav's thread pool (index.getNumThreads()) unless num_threads > 0.
++template <class FlatNavIndex>
++inline void search(
++        FlatNavIndex& index,
++        faiss::idx_t nq,
++        const float* xq,
++        int k,
++        int ef_search,
++        float* D,
++        faiss::idx_t* I,
++        int num_threads = 0,
++        int num_initializations = 100) {
++    const size_t d = index.dataDimension();
++    auto one = [&](uint32_t q) {
++        auto res = index.search(xq + static_cast<size_t>(q) * d, k, ef_search, num_initializations);
++        const size_t row = static_cast<size_t>(q) * static_cast<size_t>(k);
++        for (int j = 0; j < k; j++) {
++            bool have = j < static_cast<int>(res.size());
++            D[row + j] = have ? res[j].first : -1.0f;
++            I[row + j] = have ? static_cast<faiss::idx_t>(res[j].second) : -1;
++        }
++    };
++    uint32_t threads = num_threads > 0 ? static_cast<uint32_t>(num_threads) : index.getNumThreads();
++    if (threads <= 1) {
++        for (faiss::idx_t q = 0; q < nq; q++) {
++            one(static_cast<uint32_t>(q));
++        }
++        return;
++    }
++    flatnav::executeInParallel(0, static_cast<uint32_t>(nq), threads, one);
++}
++
++// Bytes FlatNav itself allocated for node blocks (graph only in shared mode,
++// vectors + graph in owned mode).
++template <class FlatNavIndex>
++inline uint64_t graph_bytes(const FlatNavIndex& index) {
++    return index.getTotalIndexMemory();
++}
++
++// Vector bytes held inside FlatNav's own memory (0 when shared).
++template <class FlatNavIndex>
++inline uint64_t vector_bytes(const FlatNavIndex& index) {
++    return index.usesExternalStorage()
++            ? 0
++            : static_cast<uint64_t>(index.maxNodeCount()) * index.dataSizeBytes();
++}
++
++// Graph-only bytes (M links + label per node), comparable across the
++// shared and owned layouts and with hnsw/nsg_graph_bytes_direct().
++template <class FlatNavIndex>
++inline uint64_t graph_overhead_bytes(const FlatNavIndex& index) {
++    return index.getTotalIndexMemory() - vector_bytes(index);
++}
++
++// ------------------------------------------------------------
++// Separate (owned) storage: the regular FlatNav index that keeps its
++// own copy of the vectors in its interleaved [vector][links][label]
++// node layout. Used by the *_separate_storage_* demos.
++// ------------------------------------------------------------
++inline std::unique_ptr<FlatNavL2> make_flatnav_l2_owned(
++        int d,
++        size_t max_nodes,
++        int M,
++        bool collect_stats = false) {
++    return std::make_unique<FlatNavL2>(
++            L2Distance::create(d),
++            static_cast<int>(max_nodes),
++            M,
++            collect_stats,
++            DataType::float32);
++}
++
++inline std::unique_ptr<FlatNavIP> make_flatnav_ip_owned(
++        int d,
++        size_t max_nodes,
++        int M,
++        bool collect_stats = false) {
++    return std::make_unique<FlatNavIP>(
++            IPDistance::create(d),
++            static_cast<int>(max_nodes),
++            M,
++            collect_stats,
++            DataType::float32);
++}
++
++// Copies x (n x d, row-major) into the owned index and builds the graph.
++// Labels are 0..n-1, i.e. the same ids faiss assigns to the same rows.
++template <class FlatNavIndex>
++inline void build_owned(
++        FlatNavIndex& index,
++        const float* x,
++        size_t n,
++        int ef_construction,
++        int num_threads = 1,
++        int num_initializations = 100) {
++    if (index.usesExternalStorage()) {
++        throw std::logic_error("build_owned(): index uses shared storage; use build()");
++    }
++    std::vector<int> labels(n);
++    std::iota(labels.begin(), labels.end(), 0);
++    index.setNumThreads(static_cast<uint32_t>(std::max(1, num_threads)));
++    index.template addBatch<float>(
++            const_cast<float*>(x), labels, ef_construction, num_initializations);
++}
++
++} // namespace flatnav_faiss
+diff --git a/demos/paired_flatnav_common.hpp b/demos/paired_flatnav_common.hpp
+new file mode 100644
+index 00000000..ad9bc768
+--- /dev/null
++++ b/demos/paired_flatnav_common.hpp
+@@ -0,0 +1,1240 @@
++// ============================================================
++// paired_flatnav_common.hpp
++//
++// Shared code for the four HNSW/NSG + FlatNav pair demos:
++//
++//   demo_paired_hnsw_flatnav_same_storage_parallel.cpp
++//   demo_paired_hnsw_flatnav_separate_storage_parallel.cpp
++//   demo_paired_nsg_flatnav_same_storage_parallel.cpp
++//   demo_paired_nsg_flatnav_separate_storage_parallel.cpp
++//
++// Part 1 is copied verbatim from demo_paired_hnsw_nsg_same_storage_parallal.cpp
++// (CSV logging, fvecs/ivecs readers, recall, CPU affinity helpers, and
++// build_hnsw_graph_on_shared_storage / build_nsg_graph_on_shared_storage),
++// so the pair demos log and measure exactly like the HNSW+NSG demos.
++// Part 2 adds the FlatNav / AVX2 helpers.
++//
++// Header-only and meant for single-translation-unit demos (it defines
++// non-inline functions and globals, like the original demo file).
++// ============================================================
++
++#pragma once
++
++// ---------------- Part 1: copied from the HNSW+NSG demo ----------------
++#include <faiss/IndexFlat.h>
++#include <faiss/IndexHNSW.h>
++#include <faiss/IndexNSG.h>
++#include "index_size_reporting.hpp"
++
++#include <faiss/impl/AuxIndexStructures.h>
++#include <faiss/impl/DistanceComputer.h>
++#include <faiss/impl/HNSW.h>
++#include <faiss/impl/NSG.h>
++#include <faiss/impl/VisitedTable.h>
++#include <faiss/utils/random.h>
++#include <faiss/utils/utils.h>
++
++#include <omp.h>
++#include <algorithm>
++#include <cassert>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <fstream>
++#include <iostream>
++#include <memory>
++#include <string>
++#include <thread>
++#include <unordered_set>
++#include <vector>
++
++#include <pthread.h>
++#include <sched.h>
++#include <sys/stat.h>
++ using namespace std;
++
++// ============================================================
++// Simple timing log
++//
++// Appends one CSV row per metric to a log file, in addition
++// to whatever gets printed to stdout. Flushed after every
++// write so the log is intact even if the run is interrupted
++// partway through (e.g. during a long NSG build on a big
++// dataset).
++//
++// Columns: run_timestamp, phase, metric, value
++// ============================================================
++
++std::ofstream g_log_file;
++std::string g_run_timestamp;
++
++void log_init(const std::string& path) {
++
++    g_log_file.open(
++            path,
++            std::ios::out |
++                    std::ios::app);
++
++    if (!g_log_file.is_open()) {
++
++        fprintf(
++                stderr,
++                "Warning: could not open log file '%s' — "
++                "continuing without file logging.\n",
++                path.c_str());
++
++        return;
++    }
++
++    std::time_t now =
++            std::time(nullptr);
++
++    char buf[32];
++
++    std::strftime(
++            buf,
++            sizeof(buf),
++            "%Y-%m-%dT%H:%M:%S",
++            std::localtime(&now));
++
++    g_run_timestamp =
++            std::string(buf);
++
++    // Write header only if the file is new/empty.
++    g_log_file.seekp(
++            0,
++            std::ios::end);
++
++    if (g_log_file.tellp() == 0) {
++        g_log_file
++                << "run_timestamp,phase,metric,value\n";
++    }
++
++    g_log_file.flush();
++
++    std::cout
++            << "Logging timings to: "
++            << path
++            << "\n";
++}
++
++void log_metric(
++        const std::string& phase,
++        const std::string& metric,
++        double value) {
++
++    // Always print to console.
++    std::cout
++            << "[LOG] "
++            << phase
++            << " | "
++            << metric
++            << " = "
++            << value
++            << "\n";
++
++    if (!g_log_file.is_open()) {
++        return;
++    }
++
++    g_log_file
++            << g_run_timestamp
++            << ","
++            << phase
++            << ","
++            << metric
++            << ","
++            << value
++            << "\n";
++
++    g_log_file.flush();
++}
++
++
++// ============================================================
++// Read .fvecs file
++//
++// Format:
++//
++// int32 dimension
++// float[d] vector
++// int32 dimension
++// float[d] vector
++// ...
++//
++// Returns a contiguous float array:
++//
++//     [n][d]
++//
++// Caller owns returned memory.
++// ============================================================
++
++float* fvecs_read(
++        const char* fname,
++        size_t* d_out,
++        size_t* n_out) {
++
++    FILE* f = fopen(fname, "rb");
++
++    if (!f) {
++        fprintf(
++                stderr,
++                "Could not open file: %s\n",
++                fname);
++
++        perror("");
++
++        std::abort();
++    }
++
++    int d = 0;
++
++    size_t read_count =
++            fread(
++                    &d,
++                    sizeof(int),
++                    1,
++                    f);
++
++    if (read_count != 1) {
++        fprintf(
++                stderr,
++                "Could not read dimension from %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    assert(
++            d > 0 &&
++            d < 1000000);
++
++    // --------------------------------------------------------
++    // Determine file size
++    // --------------------------------------------------------
++
++    fseek(
++            f,
++            0,
++            SEEK_END);
++
++    long file_size =
++            ftell(f);
++
++    fseek(
++            f,
++            0,
++            SEEK_SET);
++
++    const size_t vector_size_bytes =
++            sizeof(int) +
++            static_cast<size_t>(d) *
++                    sizeof(float);
++
++    if (
++            file_size <= 0 ||
++            static_cast<size_t>(file_size) %
++                            vector_size_bytes !=
++                    0) {
++
++        fprintf(
++                stderr,
++                "Invalid fvecs file size for %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    size_t n =
++            static_cast<size_t>(file_size) /
++            vector_size_bytes;
++
++    printf(
++            "Reading %s\n",
++            fname);
++
++    printf(
++            "  vectors   = %zu\n"
++            "  dimension = %d\n",
++            n,
++            d);
++
++    // --------------------------------------------------------
++    // Allocate output
++    // --------------------------------------------------------
++
++    float* data =
++            new float[
++                    n *
++                    static_cast<size_t>(d)];
++
++    // --------------------------------------------------------
++    // Read vectors
++    // --------------------------------------------------------
++
++    for (size_t i = 0; i < n; ++i) {
++
++        int current_d = 0;
++
++        if (
++                fread(
++                        &current_d,
++                        sizeof(int),
++                        1,
++                        f) !=
++                1) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading dimension at vector %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (current_d != d) {
++
++            fprintf(
++                    stderr,
++                    "Dimension mismatch at vector %zu: "
++                    "expected %d but found %d\n",
++                    i,
++                    d,
++                    current_d);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (
++                fread(
++                        data +
++                                i *
++                                        static_cast<size_t>(d),
++                        sizeof(float),
++                        d,
++                        f) !=
++                static_cast<size_t>(d)) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading vector %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++    }
++
++    fclose(f);
++
++    *d_out =
++            static_cast<size_t>(d);
++
++    *n_out =
++            n;
++
++    return data;
++}
++
++
++// ============================================================
++// Read .ivecs file (ground truth neighbor ids)
++//
++// Same on-disk layout as .fvecs, but the payload per row is
++// int32 instead of float32:
++//
++// int32 k
++// int32[k] neighbor ids
++// int32 k
++// int32[k] neighbor ids
++// ...
++//
++// Returns a contiguous int64 (idx_t) array:
++//
++//     [nq][k]
++//
++// Caller owns returned memory.
++// ============================================================
++
++faiss::idx_t* ivecs_read(
++        const char* fname,
++        size_t* k_out,
++        size_t* nq_out) {
++
++    FILE* f = fopen(fname, "rb");
++
++    if (!f) {
++        fprintf(
++                stderr,
++                "Could not open file: %s\n",
++                fname);
++
++        perror("");
++
++        std::abort();
++    }
++
++    int k = 0;
++
++    if (
++            fread(
++                    &k,
++                    sizeof(int),
++                    1,
++                    f) !=
++            1) {
++
++        fprintf(
++                stderr,
++                "Could not read k from %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    assert(
++            k > 0 &&
++            k < 1000000);
++
++    fseek(
++            f,
++            0,
++            SEEK_END);
++
++    long file_size =
++            ftell(f);
++
++    fseek(
++            f,
++            0,
++            SEEK_SET);
++
++    const size_t row_size_bytes =
++            sizeof(int) +
++            static_cast<size_t>(k) *
++                    sizeof(int);
++
++    if (
++            file_size <= 0 ||
++            static_cast<size_t>(file_size) %
++                            row_size_bytes !=
++                    0) {
++
++        fprintf(
++                stderr,
++                "Invalid ivecs file size for %s\n",
++                fname);
++
++        fclose(f);
++        std::abort();
++    }
++
++    size_t nq =
++            static_cast<size_t>(file_size) /
++            row_size_bytes;
++
++    printf(
++            "Reading %s\n",
++            fname);
++
++    printf(
++            "  queries with GT = %zu\n"
++            "  k (GT depth)    = %d\n",
++            nq,
++            k);
++
++    faiss::idx_t* data =
++            new faiss::idx_t[
++                    nq *
++                    static_cast<size_t>(k)];
++
++    std::vector<int> row_buf(
++            static_cast<size_t>(k));
++
++    for (size_t i = 0; i < nq; ++i) {
++
++        int current_k = 0;
++
++        if (
++                fread(
++                        &current_k,
++                        sizeof(int),
++                        1,
++                        f) !=
++                1) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading k at row %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (current_k != k) {
++
++            fprintf(
++                    stderr,
++                    "k mismatch at row %zu: "
++                    "expected %d but found %d\n",
++                    i,
++                    k,
++                    current_k);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        if (
++                fread(
++                        row_buf.data(),
++                        sizeof(int),
++                        k,
++                        f) !=
++                static_cast<size_t>(k)) {
++
++            fprintf(
++                    stderr,
++                    "Failed reading row %zu\n",
++                    i);
++
++            delete[] data;
++            fclose(f);
++            std::abort();
++        }
++
++        for (int j = 0; j < k; ++j) {
++            data[i * static_cast<size_t>(k) + j] =
++                    static_cast<faiss::idx_t>(
++                            row_buf[j]);
++        }
++    }
++
++    fclose(f);
++
++    *k_out =
++            static_cast<size_t>(k);
++
++    *nq_out =
++            nq;
++
++    return data;
++}
++
++
++// ============================================================
++// Recall@k helper
++//
++// For each query, count how many of the top-`eval_k` returned
++// ids appear in the ground truth's top-`eval_k` ids.
++//
++// Returns fraction in [0, 1].
++// ============================================================
++
++double compute_recall_at_k(
++        const std::vector<faiss::idx_t>& result_labels,
++        faiss::idx_t search_k,
++        const faiss::idx_t* gt,
++        size_t gt_k,
++        size_t nq,
++        size_t eval_k) {
++
++    assert(eval_k <= static_cast<size_t>(search_k));
++    assert(eval_k <= gt_k);
++
++    size_t total_correct = 0;
++    size_t total_expected = 0;
++
++    for (size_t q = 0; q < nq; ++q) {
++
++        std::unordered_set<faiss::idx_t> truth(
++                gt + q * gt_k,
++                gt + q * gt_k + eval_k);
++
++        for (size_t j = 0; j < eval_k; ++j) {
++
++            faiss::idx_t got =
++                    result_labels[
++                            q * static_cast<size_t>(search_k) +
++                            j];
++
++            if (truth.count(got)) {
++                ++total_correct;
++            }
++        }
++
++        total_expected += eval_k;
++    }
++
++    return static_cast<double>(total_correct) /
++            static_cast<double>(total_expected);
++}
++
++
++// ============================================================
++// available_cpu_count
++//
++// std::thread::hardware_concurrency() reports the machine's
++// TOTAL core count and does NOT shrink under a taskset/cgroup
++// CPU affinity restriction (verified empirically: running under
++// `taskset -c 0` on a 2-core box still reports 2, not 1). Using
++// it to size internal OpenMP thread pools means that under
++// `taskset -c 1-2` (2 CPUs) on, say, a 32-core machine, each of
++// the 2 build threads below would try to spawn ~16 OpenMP
++// workers — 32 threads fighting over 2 pinned cores instead of
++// 2 threads cleanly occupying 2 cores.
++//
++// sched_getaffinity() reports the process's actual current CPU
++// affinity mask, which DOES reflect taskset/cgroup restrictions
++// (also verified: `taskset -c 0` correctly yields a mask of 1).
++// This is what should drive how many threads we ask for.
++// ============================================================
++
++int available_cpu_count() {
++    cpu_set_t set;
++    CPU_ZERO(&set);
++
++    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
++        int count = CPU_COUNT(&set);
++        if (count > 0) {
++            return count;
++        }
++    }
++
++    // Fallback (e.g. non-Linux, or the syscall failed): total
++    // core count is still better than hardcoding 1.
++    return std::max(
++            1,
++            static_cast<int>(
++                    std::thread::hardware_concurrency()));
++}
++
++
++// ============================================================
++// affinity_cpu_list / pin_thread_to_cpu
++//
++// affinity_cpu_list() returns the actual CPU ids this process is
++// currently allowed to run on (respects taskset/cgroups — same
++// mask available_cpu_count() reads, just returned as a list of
++// ids instead of a count).
++//
++// pin_thread_to_cpu() pins a std::thread to exactly one CPU id
++// via pthread_setaffinity_np (Linux). This is what gives a hard
++// guarantee — independent of the OS scheduler's whims — that
++// the HNSW build thread and the NSG build thread each run on
++// their own dedicated core and never get scheduled onto the
++// same one (when at least 2 CPUs are available).
++// ============================================================
++
++std::vector<int> affinity_cpu_list() {
++    std::vector<int> cpus;
++
++    cpu_set_t set;
++    CPU_ZERO(&set);
++
++    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
++        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
++            if (CPU_ISSET(cpu, &set)) {
++                cpus.push_back(cpu);
++            }
++        }
++    }
++
++    if (cpus.empty()) {
++        // Fallback: assume CPUs 0..N-1 are usable.
++        int n = std::max(
++                1,
++                static_cast<int>(
++                        std::thread::hardware_concurrency()));
++        for (int cpu = 0; cpu < n; cpu++) {
++            cpus.push_back(cpu);
++        }
++    }
++
++    return cpus;
++}
++
++void pin_thread_to_cpu(std::thread& t, int cpu_id) {
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    CPU_SET(cpu_id, &set);
++
++    int rc = pthread_setaffinity_np(
++            t.native_handle(),
++            sizeof(set),
++            &set);
++
++    if (rc != 0) {
++        fprintf(
++                stderr,
++                "Warning: pthread_setaffinity_np(cpu=%d) failed "
++                "(rc=%d) — thread will run unpinned.\n",
++                cpu_id,
++                rc);
++    }
++}
++
++
++// ============================================================
++// build_hnsw_graph_on_shared_storage
++//
++// A faithful, from-scratch port of faiss's internal
++// `hnsw_add_vertices` (IndexHNSW.cpp), which is normally only
++// reachable via IndexHNSW::add() and cannot be called directly
++// from outside faiss because it lives in an anonymous
++// namespace. It is reconstructed here using ONLY public HNSW /
++// IndexHNSW members (hnsw.prepare_level_tab, hnsw.levels,
++// hnsw.add_with_locks, index_hnsw.locks, index_hnsw.storage,
++// etc. — all verified public in faiss/impl/HNSW.h and
++// faiss/IndexHNSW.h).
++//
++// Why this exists at all: IndexHNSW::add() always calls
++// storage->add(n, x) itself as its first step, so it cannot be
++// pointed at storage that has already been populated by someone
++// else (here, by us, once, up front) without adding the vectors
++// a second time. This function skips that step and only builds
++// the graph structure against storage that the CALLER has
++// already populated — which is exactly what lets HNSW and NSG
++// build their graphs concurrently on one shared IndexFlat with
++// zero vector duplication, ever.
++//
++// Precondition: index_hnsw.storage already contains exactly the
++// n vectors in x (ids 0..n-1), and this is a from-scratch build
++// (no pre-existing graph — n0 is fixed at 0 below).
++// ============================================================
++
++void build_hnsw_graph_on_shared_storage(
++        faiss::IndexHNSW& index_hnsw,
++        size_t n,
++        const float* x,
++        bool verbose) {
++
++    using storage_idx_t = faiss::HNSW::storage_idx_t;
++
++    if (n == 0) {
++        return;
++    }
++
++    const size_t n0 = 0; // from-scratch build only
++    const size_t d = static_cast<size_t>(index_hnsw.d);
++    faiss::HNSW& hnsw = index_hnsw.hnsw;
++    const size_t ntotal = n0 + n;
++
++    int max_level =
++            hnsw.prepare_level_tab(
++                    n,
++                    /*preset_levels=*/false);
++
++    if (verbose) {
++        printf("build_hnsw_graph_on_shared_storage: max_level = %d\n",
++               max_level);
++    }
++
++    auto& locks = index_hnsw.locks;
++    locks.prepare(ntotal);
++
++    // Bucket points by level, highest first — identical logic to
++    // faiss's internal hnsw_add_vertices.
++    std::vector<int> hist;
++    std::vector<int> order(n);
++
++    {
++        for (size_t i = 0; i < n; i++) {
++            storage_idx_t pt_id = static_cast<storage_idx_t>(i + n0);
++            int pt_level = hnsw.levels[pt_id] - 1;
++            while (pt_level >= static_cast<int>(hist.size())) {
++                hist.push_back(0);
++            }
++            hist[pt_level]++;
++        }
++
++        std::vector<int> offsets(hist.size() + 1, 0);
++        for (size_t i = 0; i + 1 < hist.size(); i++) {
++            offsets[i + 1] = offsets[i] + hist[i];
++        }
++
++        for (size_t i = 0; i < n; i++) {
++            storage_idx_t pt_id = static_cast<storage_idx_t>(i + n0);
++            int pt_level = hnsw.levels[pt_id] - 1;
++            order[offsets[pt_level]++] = pt_id;
++        }
++    }
++
++    size_t check_period =
++            faiss::InterruptCallback::get_period_hint(
++                    static_cast<size_t>(max_level) *
++                    d *
++                    static_cast<size_t>(hnsw.efConstruction));
++
++    faiss::RandomGenerator rng2(789);
++
++    size_t i1 = n;
++
++    for (int pt_level = static_cast<int>(hist.size()) - 1;
++         pt_level >= static_cast<int>(!index_hnsw.init_level0);
++         pt_level--) {
++
++        size_t i0 = i1 - hist[pt_level];
++
++        // Random permutation within this level's bucket, to remove
++        // dataset-order bias — same as the internal implementation.
++        for (size_t j = i0; j < i1; j++) {
++            std::swap(
++                    order[j],
++                    order[j + rng2.rand_int(static_cast<int>(i1 - j))]);
++        }
++
++        bool interrupt = false;
++
++#pragma omp parallel if (i1 > i0 + 100)
++        {
++            std::unique_ptr<faiss::VisitedTable> vt =
++                    faiss::VisitedTable::create(
++                            ntotal,
++                            hnsw.use_visited_hashset);
++
++            // storage_distance_computer() in faiss is just this one-liner,
++            // but it's a private helper (anonymous namespace), so it's
++            // inlined here directly — same call, same effect.
++            std::unique_ptr<faiss::DistanceComputer> dis(
++                    index_hnsw.storage->get_distance_computer());
++
++            size_t counter = 0;
++
++#pragma omp for schedule(static)
++            for (int64_t i = static_cast<int64_t>(i0);
++                 i < static_cast<int64_t>(i1);
++                 i++) {
++
++                storage_idx_t pt_id = order[i];
++                dis->set_query(x + (pt_id - n0) * d);
++
++                if (interrupt) {
++                    continue;
++                }
++
++                hnsw.add_with_locks(
++                        *dis,
++                        pt_level,
++                        pt_id,
++                        locks,
++                        *vt,
++                        index_hnsw.keep_max_size_level0 &&
++                                (pt_level == 0));
++
++                if (counter % check_period == 0) {
++                    if (faiss::InterruptCallback::is_interrupted()) {
++                        interrupt = true;
++                    }
++                }
++                counter++;
++            }
++        }
++
++        if (interrupt) {
++            fprintf(stderr, "HNSW build interrupted\n");
++            std::abort();
++        }
++
++        i1 = i0;
++    }
++
++    if (!index_hnsw.retain_locks) {
++        locks.clear();
++    }
++
++    // IndexHNSW::add() normally sets this from storage->ntotal after
++    // calling storage->add(); we set it directly since storage was
++    // already populated by the caller before this function ran.
++    index_hnsw.ntotal = static_cast<faiss::idx_t>(ntotal);
++}
++
++
++// ============================================================
++// build_nsg_graph_on_shared_storage
++//
++// A faithful port of the build_type == 0 (brute-force kNN
++// graph) branch of IndexNSG::add() (IndexNSG.cpp), skipping the
++// storage->add(n, x) call that branch normally makes first —
++// again, so this can run against storage the caller already
++// populated, shared with another index being built concurrently.
++//
++// Only the brute-force path (build_type == 0) is ported; NSG's
++// build_type == 1 (NNDescent) path is not needed for this demo.
++//
++// Precondition: same as build_hnsw_graph_on_shared_storage — the
++// n vectors in x are already present in index_nsg.storage as ids
++// 0..n-1, and this is a from-scratch build.
++// ============================================================
++
++void build_nsg_graph_on_shared_storage(
++        faiss::IndexNSG& index_nsg,
++        size_t n,
++        const float* x,
++        bool verbose) {
++
++    faiss::Index* storage = index_nsg.storage;
++    const int GK = index_nsg.GK;
++    const faiss::idx_t n_idx = static_cast<faiss::idx_t>(n);
++
++    if (verbose) {
++        printf("build_nsg_graph_on_shared_storage: brute-force kNN, GK=%d\n",
++               GK);
++    }
++
++    // storage->assign() is a plain read-only nearest-neighbor query — safe
++    // to run concurrently against a fully-populated, read-only IndexFlat
++    // while another thread is doing the same (or reading via
++    // get_distance_computer()) for HNSW.
++    std::vector<faiss::idx_t> knng(
++            static_cast<size_t>(n) * (GK + 1));
++
++    storage->assign(n_idx, x, knng.data(), GK + 1);
++
++    std::vector<faiss::idx_t> knng_trimmed(
++            static_cast<size_t>(n) * GK);
++
++    // Remove each point from its own neighbor list — identical logic to
++    // IndexNSG::add().
++    if (storage->metric_type == faiss::METRIC_INNER_PRODUCT) {
++        for (faiss::idx_t i = 0; i < n_idx; i++) {
++            int count = 0;
++            for (int j = 0; j < GK + 1; j++) {
++                faiss::idx_t id = knng[i * (GK + 1) + j];
++                if (id != i) {
++                    knng_trimmed[i * GK + count] = id;
++                    count += 1;
++                }
++                if (count == GK) {
++                    break;
++                }
++            }
++        }
++    } else {
++        for (faiss::idx_t i = 0; i < n_idx; i++) {
++            memmove(
++                    knng_trimmed.data() + i * GK,
++                    knng.data() + i * (GK + 1) + 1,
++                    static_cast<size_t>(GK) * sizeof(faiss::idx_t));
++        }
++    }
++
++    index_nsg.check_knn_graph(knng_trimmed.data(), n_idx, GK);
++
++    const faiss::nsg::Graph<faiss::idx_t> knn_graph(
++            knng_trimmed.data(),
++            static_cast<int>(n),
++            GK);
++
++    // The actual graph-construction step — public API, read-only against
++    // storage (only reads distances/vectors, never mutates it).
++    index_nsg.nsg.build(storage, n_idx, knn_graph, verbose);
++
++    index_nsg.ntotal = n_idx;
++    index_nsg.is_built = true;
++}
++
++
++// ============================================================
++// Main
++//
++// Usage:
++//
++// ./demo_paired_hnsw_nsg \
++//     /path/to/base.fvecs \
++//     /path/to/query.fvecs \
++//     [/path/to/groundtruth.ivecs] \
++//     [/path/to/log.csv]
++//
++// Example (SIFT1M):
++//
++// ./build/demos/demo_paired_hnsw_nsg \
++//     /home/cc/datasets/sift/base.fvecs \
++//     /home/cc/datasets/sift/query.fvecs \
++//     /home/cc/datasets/sift/groundtruth.ivecs \
++//     /home/cc/results/sift_paired_run.csv
++// ============================================================
++
++// ---------------- Part 2: FlatNav pair helpers ----------------
++
++// ============================================================
++// ------------- FlatNav pair helpers (new) -------------------
++// ============================================================
++
++#include "flatnav_faiss_storage.hpp"
++
++#include <faiss/utils/utils.h>
++
++#include <functional>
++#include <numeric>
++
++// ------------------------------------------------------------
++// AVX2-only guard.
++//
++// CMake compiles these demos with -mavx2 -mfma -mno-avx512f and
++// -DFLATNAV_FORBID_AVX512 (FLATNAV_SIMD=avx2, the default). If
++// something re-enables AVX-512 (e.g. -march=native in
++// CMAKE_CXX_FLAGS placed after our flags), fail the build instead
++// of silently benchmarking FlatNav with AVX-512 kernels.
++// ------------------------------------------------------------
++#if defined(FLATNAV_FORBID_AVX512) && defined(__AVX512F__)
++#error "AVX-512 is enabled for a FLATNAV_SIMD=avx2 build. Remove -march=native / -mavx512* from CMAKE_CXX_FLAGS."
++#endif
++
++// Always-on check (assert() disappears in Release builds with -DNDEBUG).
++#define PAIR_CHECK(cond)                                                     \
++    do {                                                                     \
++        if (!(cond)) {                                                       \
++            fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond, __FILE__,   \
++                    __LINE__);                                               \
++            std::abort();                                                    \
++        }                                                                    \
++    } while (0)
++
++// SIMD level FlatNav's distance kernels were compiled with.
++inline std::string flatnav_simd_level() {
++#if defined(USE_AVX512)
++    return "AVX-512";
++#elif defined(__AVX2__) && defined(USE_AVX)
++    return "AVX2";
++#elif defined(USE_AVX)
++    return "AVX";
++#elif defined(USE_SSE)
++    return "SSE";
++#else
++    return "scalar";
++#endif
++}
++
++// Prints which SIMD level faiss and FlatNav use; aborts if either is
++// AVX-512 when AVX2 was requested.
++inline void report_simd_config() {
++    const std::string faiss_opts = faiss::get_compile_options();
++    const std::string fn_level = flatnav_simd_level();
++
++    std::cout << "\n========================================\n"
++              << "SIMD configuration\n"
++              << "========================================\n"
++              << "faiss compile options  = " << faiss_opts << "\n"
++              << "FlatNav SIMD kernels   = " << fn_level << "\n";
++
++    log_metric("config", "faiss_avx2", faiss_opts.find("AVX2") != std::string::npos ? 1.0 : 0.0);
++    log_metric("config", "faiss_avx512", faiss_opts.find("AVX512") != std::string::npos ? 1.0 : 0.0);
++    log_metric("config", "flatnav_avx2", fn_level == "AVX2" ? 1.0 : 0.0);
++    log_metric("config", "flatnav_avx512", fn_level == "AVX-512" ? 1.0 : 0.0);
++
++#if defined(FLATNAV_FORBID_AVX512)
++    if (faiss_opts.find("AVX512") != std::string::npos) {
++        fprintf(stderr,
++                "faiss library is an AVX-512 build (%s). Link faiss_avx2 "
++                "(-DFLATNAV_FAISS_TARGET=faiss_avx2).\n",
++                faiss_opts.c_str());
++        std::abort();
++    }
++    if (faiss_opts.find("AVX2") == std::string::npos) {
++        std::cout << "WARNING: faiss library is not an AVX2 build (" << faiss_opts
++                  << "). Configure faiss with -DFAISS_OPT_LEVEL=avx2 and link faiss_avx2.\n";
++    }
++#endif
++}
++
++// ------------------------------------------------------------
++// Dataset loading (same files / checks as the HNSW+NSG demos).
++// ------------------------------------------------------------
++struct PairDataset {
++    float* xb = nullptr;
++    float* xq = nullptr;
++    faiss::idx_t* gt = nullptr;
++    int d = 0;
++    faiss::idx_t n = 0;
++    faiss::idx_t nq = 0;
++    size_t gt_k = 0;
++
++    ~PairDataset() {
++        delete[] xb;
++        delete[] xq;
++        delete[] gt;
++    }
++};
++
++inline bool load_pair_dataset(
++        const char* base_file,
++        const char* query_file,
++        const char* gt_file,
++        size_t recall_eval_k,
++        PairDataset& ds) {
++    size_t d_size = 0, nb = 0;
++    ds.xb = fvecs_read(base_file, &d_size, &nb);
++    ds.d = static_cast<int>(d_size);
++    ds.n = static_cast<faiss::idx_t>(nb);
++    std::cout << "\nBase dataset loaded\n"
++              << "d      = " << ds.d << "\n"
++              << "nb     = " << nb << "\n";
++
++    size_t qd_size = 0, nq_size = 0;
++    ds.xq = fvecs_read(query_file, &qd_size, &nq_size);
++    if (static_cast<int>(qd_size) != ds.d) {
++        fprintf(stderr,
++                "Query dimension (%zu) does not match base dimension (%d)\n",
++                qd_size,
++                ds.d);
++        return false;
++    }
++    ds.nq = static_cast<faiss::idx_t>(nq_size);
++    std::cout << "\nQuery dataset loaded\n"
++              << "nq     = " << ds.nq << "\n";
++
++    if (gt_file != nullptr && std::string(gt_file) != "-") {
++        size_t gt_nq = 0;
++        ds.gt = ivecs_read(gt_file, &ds.gt_k, &gt_nq);
++        if (gt_nq != nq_size) {
++            fprintf(stderr,
++                    "Ground truth query count (%zu) does not match query "
++                    "file count (%zu)\n",
++                    gt_nq,
++                    nq_size);
++            return false;
++        }
++        if (ds.gt_k < recall_eval_k) {
++            fprintf(stderr,
++                    "Ground truth depth (%zu) is smaller than "
++                    "RECALL_EVAL_K (%zu)\n",
++                    ds.gt_k,
++                    recall_eval_k);
++            return false;
++        }
++    } else {
++        std::cout << "\nNo ground truth file provided — "
++                  << "recall will not be computed.\n";
++    }
++    return true;
++}
++
++// ------------------------------------------------------------
++// Pinned, single-threaded build thread.
++//
++// The thread pins ITSELF (pthread_self) before doing any work, so
++// the whole build runs on `cpu_id` (pinning from the parent after
++// std::thread starts leaves a short unpinned window). OpenMP is
++// set to 1 thread inside it so faiss' #pragma omp regions stay on
++// this thread; FlatNav builds with its own num_threads=1.
++// ------------------------------------------------------------
++struct PinnedBuild {
++    double seconds = 0.0;
++    int requested_cpu = -1;
++    int ran_on_cpu = -1;
++};
++
++inline void pin_current_thread_to_cpu(int cpu_id) {
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    CPU_SET(cpu_id, &set);
++    int rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
++    if (rc != 0) {
++        fprintf(stderr,
++                "Warning: pthread_setaffinity_np(cpu=%d) failed (rc=%d) — "
++                "thread will run unpinned.\n",
++                cpu_id,
++                rc);
++    }
++}
++
++inline std::thread start_pinned_build(
++        int cpu_id,
++        PinnedBuild& out,
++        std::function<void()> work) {
++    out.requested_cpu = cpu_id;
++    return std::thread([cpu_id, &out, work]() {
++        pin_current_thread_to_cpu(cpu_id);
++        omp_set_num_threads(1);
++        auto t0 = std::chrono::high_resolution_clock::now();
++        work();
++        auto t1 = std::chrono::high_resolution_clock::now();
++        out.seconds = std::chrono::duration<double>(t1 - t0).count();
++        out.ran_on_cpu = sched_getcpu();
++    });
++}
++
++// Picks two distinct CPUs from the process affinity mask.
++inline std::pair<int, int> pick_two_cpus() {
++    std::vector<int> cpus = affinity_cpu_list();
++    std::cout << "Process CPU affinity list:";
++    for (int c : cpus) {
++        std::cout << " " << c;
++    }
++    std::cout << "\n";
++    if (cpus.size() < 2) {
++        std::cout << "WARNING: only 1 CPU available — both build threads "
++                  << "will share CPU " << cpus[0]
++                  << ". Use e.g. `taskset -c 0-1` for true 2-core parallelism.\n";
++        return {cpus[0], cpus[0]};
++    }
++    return {cpus[0], cpus[1]};
++}
++
++// ------------------------------------------------------------
++// Query reporting: QPS / ms per query / recall, printed + logged
++// with the same metric names the HNSW+NSG demos use
++// ("<name>_qps", "<name>_recall_at_<k>", ...).
++// ------------------------------------------------------------
++struct QueryReport {
++    double seconds = 0.0;
++    double qps = 0.0;
++    double ms_per_query = 0.0;
++    double recall = -1.0;
++};
++
++inline QueryReport report_query(
++        const std::string& name,
++        double seconds,
++        const std::vector<faiss::idx_t>& labels,
++        faiss::idx_t search_k,
++        const PairDataset& ds,
++        size_t recall_eval_k) {
++    QueryReport r;
++    r.seconds = seconds;
++    r.qps = static_cast<double>(ds.nq) / seconds;
++    r.ms_per_query = 1000.0 * seconds / static_cast<double>(ds.nq);
++    std::cout << name << " search time = " << seconds << " sec total, "
++              << r.ms_per_query << " ms/query, " << r.qps << " QPS\n";
++    log_metric("query", name + "_search_seconds_total", seconds);
++    log_metric("query", name + "_ms_per_query", r.ms_per_query);
++    log_metric("query", name + "_qps", r.qps);
++    if (ds.gt != nullptr) {
++        r.recall = compute_recall_at_k(
++                labels,
++                search_k,
++                ds.gt,
++                ds.gt_k,
++                static_cast<size_t>(ds.nq),
++                recall_eval_k);
++        std::cout << name << " recall@" << recall_eval_k << " = " << r.recall << "\n";
++        log_metric("query", name + "_recall_at_" + std::to_string(recall_eval_k), r.recall);
++    }
++    return r;
++}
++
++template <class F>
++inline double time_seconds(F&& f) {
++    auto t0 = std::chrono::high_resolution_clock::now();
++    f();
++    auto t1 = std::chrono::high_resolution_clock::now();
++    return std::chrono::duration<double>(t1 - t0).count();
++}
++
++inline double to_mb(size_t bytes) {
++    return bytes / (1024.0 * 1024.0);
++}
